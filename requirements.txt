@@ -1,0 +1,12 @@
+-e .
+
+gunicorn
+
+# linting
+mypy
+pre-commit
+pylint
+types-Flask
+lxml-stubs
+
+virtualenv

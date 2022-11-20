@@ -1,0 +1,24 @@
+DROP TABLE IF EXISTS users;
+DROP TABLE IF EXISTS testrun;
+DROP TABLE IF EXISTS results;
+
+CREATE TABLE users (
+    id INTEGER PRIMARY KEY,
+    name TEXT NOT NULL,
+    password_hash TEXT NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL
+);
+
+CREATE TABLE testrun (
+    id INTEGER PRIMARY KEY,
+    name TEXT NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL
+);
+
+CREATE TABLE results (
+    id INTEGER PRIMARY KEY,
+    test_name TEXT NOT NULL,
+    verdict TEXT NOT NULL,
+    testrun_id INTEGER NOT NULL,
+    user_id INTEGER
+);
