@@ -29,6 +29,13 @@ def get_passed(tests_verdicts: List[common.TestVerdict]) -> Set[str]:
     return passed
 
 
+def get_nonpassed(tests_verdicts: List[common.TestVerdict]) -> Set[str]:
+    """Get tests that haven't passed yet."""
+    passed = {r.testid for r in tests_verdicts if r.verdict == common.VerdictValues.PASSED}
+    all_tests = {r.testid for r in tests_verdicts}
+    return all_tests - passed
+
+
 @flask_auth.auth.verify_password
 def verify_password(username: str, password: str) -> Optional[dict]:
     conn = flask_db.get_db()
@@ -93,8 +100,18 @@ def _get_passed_common(testrun_name: str) -> List[str]:
     tests_verdicts = results_cache.load_testrun(
         conn=conn, testrun_name=testrun_name, user_id=flask_auth.auth.current_user()["user_id"]
     )
-    passed_tests = sorted(get_passed(tests_verdicts=tests_verdicts))
-    return passed_tests
+    tests = sorted(get_passed(tests_verdicts=tests_verdicts))
+    return tests
+
+
+def _get_nonpassed_common(testrun_name: str) -> List[str]:
+    """Get tests that haven't passed yet."""
+    conn = flask_db.get_db()
+    tests_verdicts = results_cache.load_testrun(
+        conn=conn, testrun_name=testrun_name, user_id=flask_auth.auth.current_user()["user_id"]
+    )
+    tests = sorted(get_nonpassed(tests_verdicts=tests_verdicts))
+    return tests
 
 
 def _pytestify(tests: List[str]) -> List[str]:
@@ -128,25 +145,41 @@ def _pytestify(tests: List[str]) -> List[str]:
     return nodeids
 
 
+def _tests_response(tests: List[str]) -> flask.Response:
+    tests_str = "\n".join(tests)
+
+    response = flask.make_response(tests_str, 200)
+    response.mimetype = "text/plain"
+    return response
+
+
 @results.route("/results/<testrun_name>/passed", methods=["GET"])
 @flask_auth.auth.login_required
 def get_passed_api(testrun_name: str) -> flask.Response:
     """Get tests that already passed."""
-    passed_tests = _get_passed_common(testrun_name=testrun_name)
-    passed_tests_str = "\n".join(passed_tests)
-
-    response = flask.make_response(passed_tests_str, 200)
-    response.mimetype = "text/plain"
-    return response
+    tests = _get_passed_common(testrun_name=testrun_name)
+    return _tests_response(tests=tests)
 
 
 @results.route("/results/<testrun_name>/pypassed", methods=["GET"])
 @flask_auth.auth.login_required
 def get_pypassed_api(testrun_name: str) -> flask.Response:
-    """Get tests that already passed in pytest nodeid format."""
-    passed_tests = _pytestify(_get_passed_common(testrun_name=testrun_name))
-    passed_tests_str = "\n".join(passed_tests)
+    """Get tests that already passed - pytest nodeid format."""
+    tests = _pytestify(_get_passed_common(testrun_name=testrun_name))
+    return _tests_response(tests=tests)
 
-    response = flask.make_response(passed_tests_str, 200)
-    response.mimetype = "text/plain"
-    return response
+
+@results.route("/results/<testrun_name>/rerun", methods=["GET"])
+@flask_auth.auth.login_required
+def get_nonpassed_api(testrun_name: str) -> flask.Response:
+    """Get tests haven't passed yet."""
+    tests = _get_nonpassed_common(testrun_name=testrun_name)
+    return _tests_response(tests=tests)
+
+
+@results.route("/results/<testrun_name>/pyrerun", methods=["GET"])
+@flask_auth.auth.login_required
+def get_pynonpassed_api(testrun_name: str) -> flask.Response:
+    """Get tests that haven't passed yet - pytest nodeid format."""
+    tests = _pytestify(_get_nonpassed_common(testrun_name=testrun_name))
+    return _tests_response(tests=tests)
