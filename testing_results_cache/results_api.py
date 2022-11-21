@@ -7,10 +7,10 @@ import flask
 from werkzeug import security
 
 from testing_results_cache import common
-from testing_results_cache import results_cache
 from testing_results_cache import flask_auth
 from testing_results_cache import flask_db
 from testing_results_cache import junittools
+from testing_results_cache import results_cache
 from testing_results_cache import users
 
 
@@ -87,15 +87,61 @@ def import_results(testrun_name: str, job_id: str) -> dict:
     }
 
 
-@results.route("/results/<testrun_name>/passed", methods=["GET"])
-@flask_auth.auth.login_required
-def get_passed_api(testrun_name: str) -> flask.Response:
+def _get_passed_common(testrun_name: str) -> List[str]:
     """Get tests that already passed."""
     conn = flask_db.get_db()
     tests_verdicts = results_cache.load_testrun(
         conn=conn, testrun_name=testrun_name, user_id=flask_auth.auth.current_user()["user_id"]
     )
     passed_tests = sorted(get_passed(tests_verdicts=tests_verdicts))
+    return passed_tests
+
+
+def _pytestify(tests: List[str]) -> List[str]:
+    """Reformat test names to pytest nodeid format."""
+    nodeids = []
+    for t in tests:
+        classname, title = t.split("::")
+        classparts = classname.split(".")
+
+        test_idx = -1
+        for i, p in enumerate(classparts):
+            if p.startswith("test_"):
+                test_idx = i
+                break
+        else:
+            flask.current_app.logger.warning(f"Cannot find test file in {t}")
+            continue
+
+        new_parts = [f"{classparts[test_idx]}.py"] + classparts[test_idx + 1 :]
+        if len(new_parts) > 2:
+            flask.current_app.logger.warning(f"Unexpected test name {t}")
+            continue
+
+        new_classname = "::".join(new_parts)
+        nodeid = f"{new_classname}::{title}"
+        nodeids.append(nodeid)
+
+    return nodeids
+
+
+@results.route("/results/<testrun_name>/passed", methods=["GET"])
+@flask_auth.auth.login_required
+def get_passed_api(testrun_name: str) -> flask.Response:
+    """Get tests that already passed."""
+    passed_tests = _get_passed_common(testrun_name=testrun_name)
+    passed_tests_str = "\n".join(passed_tests)
+
+    response = flask.make_response(passed_tests_str, 200)
+    response.mimetype = "text/plain"
+    return response
+
+
+@results.route("/results/<testrun_name>/pypassed", methods=["GET"])
+@flask_auth.auth.login_required
+def get_pypassed_api(testrun_name: str) -> flask.Response:
+    """Get tests that already passed in pytest nodeid format."""
+    passed_tests = _pytestify(_get_passed_common(testrun_name=testrun_name))
     passed_tests_str = "\n".join(passed_tests)
 
     response = flask.make_response(passed_tests_str, 200)

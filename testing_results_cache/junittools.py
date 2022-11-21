@@ -46,7 +46,7 @@ def _get_testcases_data(testsuite: etree._Element) -> List[common.TestVerdict]:
         title = test_data.get("name") or ""
         classname = test_data.get("classname") or ""
 
-        data = common.TestVerdict(testid=f"{classname}.{title}", verdict=verdict)
+        data = common.TestVerdict(testid=f"{classname}::{title}", verdict=verdict)
 
         results.append(data)
 

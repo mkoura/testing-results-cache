@@ -1,4 +1,5 @@
 """A flask app for caching testing results."""
+import logging
 import os
 from pathlib import Path
 from typing import Optional
@@ -10,6 +11,8 @@ from testing_results_cache import results_api
 
 
 INSTANCE_PATH = Path(__file__).parent.parent / "instance_dev"
+
+logging.basicConfig(format="%(name)s: %(levelname)s: %(message)s", level=logging.WARNING)
 
 
 def get_instance_path() -> Optional[str]:
