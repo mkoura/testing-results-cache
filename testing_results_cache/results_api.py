@@ -113,13 +113,16 @@ def _pytestify(tests: List[str]) -> List[str]:
             flask.current_app.logger.warning(f"Cannot find test file in {t}")
             continue
 
-        new_parts = [f"{classparts[test_idx]}.py"] + classparts[test_idx + 1 :]
-        if len(new_parts) > 2:
+        file_class_parts = [f"{classparts[test_idx]}.py"] + classparts[test_idx + 1 :]
+        if len(file_class_parts) > 2:
             flask.current_app.logger.warning(f"Unexpected test name {t}")
             continue
 
-        new_classname = "::".join(new_parts)
-        nodeid = f"{new_classname}::{title}"
+        file_class = "::".join(file_class_parts)
+        node_path = "/".join(classparts[:test_idx])
+        if node_path:
+            node_path += "/"
+        nodeid = f"{node_path}{file_class}::{title}"
         nodeids.append(nodeid)
 
     return nodeids
