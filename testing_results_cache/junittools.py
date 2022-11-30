@@ -8,13 +8,23 @@ from lxml import etree
 from testing_results_cache import common
 
 
+def _sanitize_xml(xml_str: str) -> str:
+    """Sanitize XML string to make it valid for XML."""
+    # there is a bug in pytest junit output that leads to some invalid characters in XML
+    xml_str = xml_str.replace("\033", "#x1B")
+    return xml_str
+
+
 def _get_xml_root(junit_file: Path) -> etree._Element:
+    # sanitize XML to make it valid
+    _xml_str = junit_file.read_text()
+    xml_str = _sanitize_xml(_xml_str)
     try:
-        tree = etree.parse(junit_file.expanduser())
+        root = etree.fromstring(bytes(xml_str, encoding="utf-8"))
     except Exception as err:
         raise ValueError("Failed to parse JUnit XML file '{junit_file}'") from err
 
-    return tree.getroot()
+    return root
 
 
 def _get_verdict(testcase_record: etree._Element) -> str:
