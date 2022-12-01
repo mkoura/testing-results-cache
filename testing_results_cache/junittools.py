@@ -11,8 +11,8 @@ from testing_results_cache import common
 def _sanitize_xml(xml_str: str) -> str:
     """Sanitize XML string to make it valid for XML."""
     # there is a bug in pytest junit output that leads to some invalid characters in XML
-    xml_str = xml_str.replace("\033", "#x1B")
-    return xml_str
+    xml_fixed = xml_str.replace("\033", "#x1B")
+    return xml_fixed
 
 
 def _get_xml_root(junit_file: Path) -> etree._Element:
