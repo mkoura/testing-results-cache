@@ -82,11 +82,16 @@ def import_results(testrun_name: str, job_id: str) -> dict:
     filepath.parent.mkdir(parents=True, exist_ok=True)
     file.save(str(filepath))
 
-    testrun_id = import_testrun(
-        junit_file=filepath,
-        testrun_name=testrun_name,
-        user_id=flask_auth.auth.current_user()["user_id"],
-    )
+    try:
+        testrun_id = import_testrun(
+            junit_file=filepath,
+            testrun_name=testrun_name,
+            user_id=flask_auth.auth.current_user()["user_id"],
+        )
+    except ValueError:
+        flask.current_app.logger.exception(f"Failed to import testrun '{testrun_name}'")
+        filepath.unlink()
+        flask.abort(400, "Failed to import testrun")
 
     return {
         "junitxml": f"{upload_folder.name}/{testrun_name}/{job_id}/junit.xml",
