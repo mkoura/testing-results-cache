@@ -120,18 +120,23 @@ def _get_nonpassed_common(testrun_name: str) -> List[str]:
 
 
 def _pytestify(tests: List[str]) -> List[str]:
-    """Reformat test names to pytest nodeid format."""
+    """Reformat test names to pytest nodeid format.
+
+    Pytest nodeid format: "path/to/test_file.py::TestClass::test_name"
+    """
     nodeids = []
     for t in tests:
         classname, title = t.split("::")
         classparts = classname.split(".")
 
+        # e.g. find "test_lobster" in
+        # cardano_node_tests.tests.test_plutus.test_lobster.TestLobsterChallenge
         test_idx = -1
         for i, p in enumerate(classparts):
             if p.startswith("test_"):
                 test_idx = i
-                break
-        else:
+
+        if test_idx == -1:
             flask.current_app.logger.warning(f"Cannot find test file in {t}")
             continue
 
