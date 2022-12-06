@@ -1,0 +1,14 @@
+[Unit]
+Description=tcache
+After=network.target network-online.target
+Requires=network-online.target
+
+[Service]
+Type=simple
+User=tcache
+Group=tcache
+ExecStart=/home/tcache/testing-results-cache/start_service.sh
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
