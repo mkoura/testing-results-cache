@@ -38,8 +38,13 @@ def _get_verdict(testcase_record: etree._Element) -> str:
             verdict = common.VerdictValues.FAILED
             break
         elif element.tag == "skipped":
-            verdict = common.VerdictValues.SKIPPED
+            skip_type = element.get("type") or ""
+            if "xfail" in skip_type:
+                verdict = common.VerdictValues.XFAILED
+            else:
+                verdict = common.VerdictValues.SKIPPED
             break
+
     if not verdict:
         verdict = common.VerdictValues.PASSED
 

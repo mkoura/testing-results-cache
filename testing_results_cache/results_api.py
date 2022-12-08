@@ -25,13 +25,21 @@ def allowed_file(filename: Path) -> bool:
 
 def get_passed(tests_verdicts: List[common.TestVerdict]) -> Set[str]:
     """Get tests that already passed."""
-    passed = {r.testid for r in tests_verdicts if r.verdict == common.VerdictValues.PASSED}
+    passed = {
+        r.testid
+        for r in tests_verdicts
+        if r.verdict in [common.VerdictValues.PASSED, common.VerdictValues.XFAILED]
+    }
     return passed
 
 
 def get_nonpassed(tests_verdicts: List[common.TestVerdict]) -> Set[str]:
     """Get tests that haven't passed yet."""
-    passed = {r.testid for r in tests_verdicts if r.verdict == common.VerdictValues.PASSED}
+    passed = {
+        r.testid
+        for r in tests_verdicts
+        if r.verdict in [common.VerdictValues.PASSED, common.VerdictValues.XFAILED]
+    }
     all_tests = {r.testid for r in tests_verdicts}
     return all_tests - passed
 
