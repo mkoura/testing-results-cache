@@ -9,6 +9,7 @@ class VerdictValues:
     PASSED = "passed"
     FAILED = "failed"
     SKIPPED = "skipped"
+    XFAILED = "xfailed"
 
 
 class TestVerdict(NamedTuple):
