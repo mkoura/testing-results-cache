@@ -85,14 +85,20 @@ def import_testrun(junit_file: Path, testrun_name: str, user_id: int) -> int:
 def import_results(testrun_name: str, job_id: str) -> dict:
     """Upload a JUnit XML file for a given testrun."""
     if "junitxml" not in flask.request.files:
-        flask.abort(400, "No file part")
+        response = flask.jsonify(message="No file part")
+        response.status_code = 400
+        flask.abort(response)
 
     file = flask.request.files["junitxml"]
     if file.filename == "":
-        flask.abort(400, "No selected file")
+        response = flask.jsonify(message="No selected file")
+        response.status_code = 400
+        flask.abort(response)
 
     if not (file and allowed_file(Path(file.filename))):
-        flask.abort(400, "Unexpected file type")
+        response = flask.jsonify(message="Unexpected file type")
+        response.status_code = 400
+        flask.abort(response)
 
     upload_folder = Path(flask.current_app.config["UPLOAD_FOLDER"])
 
@@ -107,7 +113,9 @@ def import_results(testrun_name: str, job_id: str) -> dict:
     filepath = upload_folder / testrun_name / job_id / f"{file_checksum}.xml"
     if filepath.exists():
         upload_filepath.unlink()
-        flask.abort(400, "File already exists")
+        response = flask.jsonify(message="File was already uploaded")
+        response.status_code = 400
+        flask.abort(response)
 
     upload_filepath.rename(filepath)
 
@@ -120,7 +128,9 @@ def import_results(testrun_name: str, job_id: str) -> dict:
     except ValueError:
         flask.current_app.logger.exception(f"Failed to import testrun '{testrun_name}'")
         filepath.unlink()
-        flask.abort(400, "Failed to import testrun")
+        response = flask.jsonify(message="Failed to import testrun")
+        response.status_code = 400
+        flask.abort(response)
 
     return {
         "junitxml": f"{upload_folder.name}/{testrun_name}/{job_id}/{file_checksum}.xml",
