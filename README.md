@@ -90,3 +90,43 @@ tcache-3-74-115-22.nip.io {
         reverse_proxy /results/* 127.0.0.1:8000
 }
 ```
+
+## Run the service for local development
+
+Make sure to activate python virtual env and finish setup steps first.
+
+```sh
+flask --app 'testing_results_cache.app:create_app()' --debug run
+```
+
+## Queries
+
+Submit results:
+
+```sh
+curl -X PUT --fail-with-body -u username:password http://localhost:5000/results/testrun1/1/import -F "junitxml=@/home/user/path/to/junit.xml"
+```
+
+Get passed tests in given testrun:
+
+```sh
+curl -u username:password http://localhost:5000/results/testrun1/passed
+```
+
+Get passed tests in given testrun formatted as pytest nodeid:
+
+```sh
+curl -u username:password http://localhost:5000/results/testrun1/pypassed
+```
+
+Get tests that need re-run in given testrun:
+
+```sh
+curl -u username:password http://localhost:5000/results/testrun1/rerun
+```
+
+Get tests formatted as pytest nodeid that need re-run in given testrun:
+
+```sh
+curl -u username:password http://localhost:5000/results/testrun1/pyrerun
+```
