@@ -1,3 +1,6 @@
+import hashlib
+import random
+import string
 from pathlib import Path
 from typing import List
 from typing import Optional
@@ -17,6 +20,15 @@ from testing_results_cache import users
 ALLOWED_EXTENSIONS = {".xml"}
 
 results = flask.Blueprint("results", __name__)
+
+
+def checksum(filename: Path, blocksize: int = 65536) -> str:
+    """Return file checksum."""
+    hash_o = hashlib.sha1()
+    with open(filename, "rb") as f:
+        for block in iter(lambda: f.read(blocksize), b""):
+            hash_o.update(block)
+    return hash_o.hexdigest()
 
 
 def allowed_file(filename: Path) -> bool:
@@ -83,12 +95,21 @@ def import_results(testrun_name: str, job_id: str) -> dict:
         flask.abort(400, "Unexpected file type")
 
     upload_folder = Path(flask.current_app.config["UPLOAD_FOLDER"])
-    filepath = upload_folder / testrun_name / job_id / "junit.xml"
+
+    # enable multiple uploads for the same testrun and job, because the same job can be re-run
+    rand_str = "".join(random.choice(string.ascii_lowercase) for __ in range(5))
+    upload_filepath = upload_folder / testrun_name / job_id / f"upload-{rand_str}.xml"
+
+    upload_filepath.parent.mkdir(parents=True, exist_ok=True)
+    file.save(str(upload_filepath))
+
+    file_checksum = checksum(upload_filepath)
+    filepath = upload_folder / testrun_name / job_id / f"{file_checksum}.xml"
     if filepath.exists():
+        upload_filepath.unlink()
         flask.abort(400, "File already exists")
 
-    filepath.parent.mkdir(parents=True, exist_ok=True)
-    file.save(str(filepath))
+    upload_filepath.rename(filepath)
 
     try:
         testrun_id = import_testrun(
@@ -102,7 +123,7 @@ def import_results(testrun_name: str, job_id: str) -> dict:
         flask.abort(400, "Failed to import testrun")
 
     return {
-        "junitxml": f"{upload_folder.name}/{testrun_name}/{job_id}/junit.xml",
+        "junitxml": f"{upload_folder.name}/{testrun_name}/{job_id}/{file_checksum}.xml",
         "testrun_id": testrun_id,
     }
 
