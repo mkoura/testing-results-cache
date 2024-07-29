@@ -78,7 +78,7 @@ def get_testsuite_data(junit_file: Path) -> common.TestsuiteData:
 
     testsuite = testsuites[0]
     testcases_data = _get_testcases_data(testsuite=testsuite)
-    timestamp_str = testsuite.get("timestamp", "1970-01-01T00:00:00.000000")
+    timestamp_str = testsuite.get("timestamp", "1970-01-01T00:00:00.000000").replace("+00:00", "")
     timestamp = datetime.strptime(timestamp_str, "%Y-%m-%dT%H:%M:%S.%f")
     testsuite_data = common.TestsuiteData(timestamp=timestamp, tests_verdicts=testcases_data)
 
