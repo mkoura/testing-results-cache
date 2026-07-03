@@ -1,5 +1,7 @@
 """Helper functions for handling data in pytest JUnit format."""
+
 from datetime import datetime
+from datetime import timezone
 from pathlib import Path
 from typing import List
 
@@ -22,7 +24,8 @@ def _get_xml_root(junit_file: Path) -> etree._Element:
     try:
         root = etree.fromstring(bytes(xml_str, encoding="utf-8"))
     except Exception as err:
-        raise ValueError("Failed to parse JUnit XML file '{junit_file}'") from err
+        msg = f"Failed to parse JUnit XML file '{junit_file}'"
+        raise ValueError(msg) from err
 
     return root
 
@@ -74,12 +77,15 @@ def get_testsuite_data(junit_file: Path) -> common.TestsuiteData:
 
     testsuites: List[etree._Element] = xml_root.xpath(".//testsuite") or []  # type: ignore
     if len(testsuites) != 1:
-        raise ValueError("Expecting single testsuite in JUnit XML file")
+        msg = "Expecting single testsuite in JUnit XML file"
+        raise ValueError(msg)
 
     testsuite = testsuites[0]
     testcases_data = _get_testcases_data(testsuite=testsuite)
     timestamp_str = testsuite.get("timestamp", "1970-01-01T00:00:00.000000").replace("+00:00", "")
-    timestamp = datetime.strptime(timestamp_str, "%Y-%m-%dT%H:%M:%S.%f")
+    timestamp = datetime.strptime(timestamp_str, "%Y-%m-%dT%H:%M:%S.%f").replace(
+        tzinfo=timezone.utc
+    )
     testsuite_data = common.TestsuiteData(timestamp=timestamp, tests_verdicts=testcases_data)
 
     return testsuite_data
