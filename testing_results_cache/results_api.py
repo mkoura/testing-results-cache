@@ -16,8 +16,10 @@ from testing_results_cache import junittools
 from testing_results_cache import results_cache
 from testing_results_cache import users
 
-
 ALLOWED_EXTENSIONS = {".xml"}
+
+# a pytest nodeid path segment is at most "file.py::ClassName"
+MAX_FILE_CLASS_PARTS = 2
 
 results = flask.Blueprint("results", __name__)
 
@@ -179,8 +181,8 @@ def _pytestify(tests: List[str]) -> List[str]:
             flask.current_app.logger.warning(f"Cannot find test file in {t}")
             continue
 
-        file_class_parts = [f"{classparts[test_idx]}.py"] + classparts[test_idx + 1 :]
-        if len(file_class_parts) > 2:
+        file_class_parts = [f"{classparts[test_idx]}.py", *classparts[test_idx + 1 :]]
+        if len(file_class_parts) > MAX_FILE_CLASS_PARTS:
             flask.current_app.logger.warning(f"Unexpected test name {t}")
             continue
 

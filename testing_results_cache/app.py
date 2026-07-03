@@ -1,4 +1,5 @@
 """A flask app for caching testing results."""
+
 import logging
 import os
 from pathlib import Path
@@ -8,7 +9,6 @@ import flask
 
 from testing_results_cache import flask_db
 from testing_results_cache import results_api
-
 
 INSTANCE_PATH = Path(__file__).parent.parent / "instance_dev"
 

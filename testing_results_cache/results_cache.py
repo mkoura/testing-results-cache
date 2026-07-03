@@ -1,4 +1,5 @@
 """Helper functions for handling data in sqlite3."""
+
 import sqlite3
 from typing import List
 

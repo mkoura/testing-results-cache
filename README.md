@@ -24,26 +24,17 @@ git clone https://github.com/mkoura/testing-results-cache.git
 cd testing-results-cache
 ```
 
-Create and activate python virtual env
+Install [uv](https://docs.astral.sh/uv/), then create the virtual environment and install
+the package with its dependencies
 
 ```sh
-python3 -m venv .env
-. .env/bin/activate
+make install
 ```
 
-Update python virtual env
+This creates a `.venv` virtual environment. Activate it with
 
 ```sh
-python3 -m pip install --upgrade pip
-python3 -m pip install --upgrade wheel
-python3 -m pip install --upgrade virtualenv
-virtualenv --upgrade-embed-wheels
-```
-
-Install the package
-
-```sh
-python3 -m pip install --upgrade --upgrade-strategy eager -e .
+. .venv/bin/activate
 ```
 
 ## Setup

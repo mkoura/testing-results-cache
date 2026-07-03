@@ -1,5 +1,5 @@
 import sqlite3
-from typing import Any
+from typing import Optional
 
 import click
 import flask
@@ -27,7 +27,7 @@ def init_db() -> None:
         db.executescript(f.read().decode())
 
 
-def close_db(e: Any = None) -> None:  # pylint: disable=unused-argument,invalid-name
+def close_db(_exc: Optional[BaseException] = None) -> None:
     db = flask.g.pop("db", None)
 
     if db is not None:
