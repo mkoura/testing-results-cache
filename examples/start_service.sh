@@ -8,7 +8,7 @@ pushd "$SCRIPT_DIR" > /dev/null
 
 # set environment variables, activate virtualenv, etc.
 # shellcheck disable=SC1091
-. .env/bin/activate
+. .venv/bin/activate
 export INSTANCE_PATH="$HOME/instance"
 mkdir -p "$INSTANCE_PATH"
 
