@@ -8,6 +8,10 @@
 install: ## Install the package and its dependencies into a uv-managed virtual environment
 	uv sync
 
+.PHONY: update-uv-lock
+update-uv-lock: ## Update uv lockfile
+	uv lock
+
 ## ---------------------------------------------------------------------------
 ## Linting
 ## ---------------------------------------------------------------------------
