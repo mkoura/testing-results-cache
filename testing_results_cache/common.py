@@ -22,3 +22,10 @@ class TestsuiteData(NamedTuple):
 
     timestamp: datetime
     tests_verdicts: List[TestVerdict]
+
+
+class HistoryEntry(NamedTuple):
+    """A dumped JUnit XML for a testrun+job - no verdict info, just when it landed."""
+
+    job_id: str
+    timestamp: datetime

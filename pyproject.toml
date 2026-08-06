@@ -26,6 +26,7 @@ dev = [
     "gunicorn",
     "mypy",
     "pre-commit",
+    "pytest",
     "ruff",
     "types-flask",
     "lxml-stubs",
