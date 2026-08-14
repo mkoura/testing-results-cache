@@ -32,9 +32,11 @@ CREATE TABLE history (
     testrun_name TEXT NOT NULL,
     job_id TEXT NOT NULL,
     user_id INTEGER,
-    -- Deliberately TEXT, not TIMESTAMP: sqlite3's PARSE_DECLTYPES converter
-    -- crashes reading back a value with a zero-microsecond, UTC-offset
-    -- timestamp. This column is formatted/parsed by history_cache.py itself.
+    -- Deliberately TEXT, not TIMESTAMP: sqlite3's default (deprecated since
+    -- Python 3.12) PARSE_DECLTYPES converter crashes reading back a value
+    -- with a zero-microsecond, UTC-offset timestamp, and silently drops the
+    -- offset when microseconds are nonzero. This column is formatted/parsed
+    -- by history_cache.py itself.
     timestamp TEXT NOT NULL,
     UNIQUE (testrun_name, job_id)
 );

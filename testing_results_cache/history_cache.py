@@ -15,32 +15,40 @@ from typing import List
 from testing_results_cache import common
 
 # See the comment on history.timestamp in schema.sql - never rely on
-# sqlite3's own datetime adapter/converter for this column.
-_TIMESTAMP_FORMAT = "%Y-%m-%d %H:%M:%S.%f"
+# sqlite3's own datetime adapter/converter for this column. This fixed-width,
+# zero-padded, offset-free format also makes the lexicographic comparison in
+# the `timestamp >= ?` SQL below match chronological order.
+TIMESTAMP_FORMAT = "%Y-%m-%d %H:%M:%S.%f"
 
 
 def _format_timestamp(value: datetime) -> str:
-    return value.strftime(_TIMESTAMP_FORMAT)
+    return value.strftime(TIMESTAMP_FORMAT)
 
 
 def _parse_timestamp(value: str) -> datetime:
-    return datetime.strptime(value, _TIMESTAMP_FORMAT).replace(tzinfo=timezone.utc)
+    return datetime.strptime(value, TIMESTAMP_FORMAT).replace(tzinfo=timezone.utc)
 
 
 def save_history_entry(
     conn: sqlite3.Connection, testrun_name: str, job_id: str, user_id: int
 ) -> bool:
-    """Record a new history entry. Returns False if one already exists."""
-    try:
-        conn.execute(
-            "INSERT INTO history(testrun_name, job_id, user_id, timestamp) VALUES (?,?,?,?)",
-            (testrun_name, job_id, user_id, _format_timestamp(datetime.now(timezone.utc))),
-        )
-        conn.commit()
-    except sqlite3.IntegrityError:
-        conn.rollback()
-        return False
-    return True
+    """Insert a new history entry without committing. Returns False if one already exists.
+
+    The caller owns the transaction: commit only after any state the row
+    promises (e.g. the XML file) is in place.
+    """
+    # ON CONFLICT ... DO NOTHING (vs INSERT OR IGNORE) means NOT NULL and
+    # CHECK violations still raise - bugs that must surface, not get
+    # reported to the client as an existing entry. The explicit conflict
+    # target additionally keeps any future second UNIQUE constraint from
+    # being misread as "duplicate".
+    cur = conn.cursor()
+    cur.execute(
+        "INSERT INTO history(testrun_name, job_id, user_id, timestamp) VALUES (?,?,?,?) "
+        "ON CONFLICT(testrun_name, job_id) DO NOTHING",
+        (testrun_name, job_id, user_id, _format_timestamp(datetime.now(timezone.utc))),
+    )
+    return cur.rowcount == 1
 
 
 def history_entry_exists(conn: sqlite3.Connection, testrun_name: str, job_id: str) -> bool:
@@ -69,7 +77,14 @@ def get_history_entries(
         (testrun_name, _format_timestamp(cutoff)),
     )
     rows = cur.fetchall()
-    return [
-        common.HistoryEntry(job_id=job_id, timestamp=_parse_timestamp(timestamp))
-        for job_id, timestamp in rows
-    ]
+    entries = []
+    for job_id, timestamp in rows:
+        try:
+            parsed = _parse_timestamp(timestamp)
+        except ValueError as exc:
+            # One bad row 500s the whole listing - name it, so the operator
+            # doesn't need a table scan to find it.
+            msg = f"Malformed timestamp {timestamp!r} for {testrun_name}/{job_id}"
+            raise ValueError(msg) from exc
+        entries.append(common.HistoryEntry(job_id=job_id, timestamp=parsed))
+    return entries

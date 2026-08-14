@@ -1,6 +1,5 @@
 import base64
 from pathlib import Path
-from typing import Iterator
 
 import flask
 import flask.testing
@@ -18,7 +17,7 @@ OTHER_PASSWORD = "other-secret"
 
 
 @pytest.fixture
-def app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[flask.Flask]:
+def app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> flask.Flask:
     monkeypatch.setenv("INSTANCE_PATH", str(tmp_path / "instance"))
     flask_app = app_module.create_app()
     flask_app.config.update(
@@ -42,10 +41,7 @@ def app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[flask.Flask
             password_hash=security.generate_password_hash(OTHER_PASSWORD),
         )
 
-    yield flask_app
-
-    with flask_app.app_context():
-        flask_db.close_db()
+    return flask_app
 
 
 @pytest.fixture

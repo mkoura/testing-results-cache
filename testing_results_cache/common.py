@@ -2,6 +2,9 @@ from datetime import datetime
 from typing import List
 from typing import NamedTuple
 
+# JUnit XML is the only upload format accepted anywhere in the service.
+ALLOWED_EXTENSIONS = frozenset({".xml"})
+
 
 class VerdictValues:
     """Verdict values."""
@@ -25,7 +28,14 @@ class TestsuiteData(NamedTuple):
 
 
 class HistoryEntry(NamedTuple):
-    """A dumped JUnit XML for a testrun+job - no verdict info, just when it landed."""
+    """Record that a JUnit XML dump exists for a job - no verdict info, just when it landed.
+
+    `timestamp` is always tz-aware UTC - attached by `history_cache._parse_timestamp`
+    when rows are read back in `get_history_entries` (currently the only place
+    this tuple is constructed). `job_id` was validated at the API layer before
+    insert (history_api rejects anything outside [A-Za-z0-9_.-]); rows inserted
+    by other means bypass that check.
+    """
 
     job_id: str
     timestamp: datetime

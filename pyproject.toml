@@ -42,6 +42,9 @@ source = "vcs"
 [tool.hatch.build.targets.wheel]
 packages = ["testing_results_cache"]
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
 [tool.ruff]
 line-length = 100
 
