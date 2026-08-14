@@ -16,8 +16,6 @@ from testing_results_cache import junittools
 from testing_results_cache import results_cache
 from testing_results_cache import users
 
-ALLOWED_EXTENSIONS = {".xml"}
-
 # a pytest nodeid path segment is at most "file.py::ClassName"
 MAX_FILE_CLASS_PARTS = 2
 
@@ -34,7 +32,7 @@ def checksum(filename: Path, blocksize: int = 65536) -> str:
 
 
 def allowed_file(filename: Path) -> bool:
-    return filename.suffix.lower() in ALLOWED_EXTENSIONS
+    return filename.suffix.lower() in common.ALLOWED_EXTENSIONS
 
 
 def get_passed(tests_verdicts: List[common.TestVerdict]) -> Set[str]:

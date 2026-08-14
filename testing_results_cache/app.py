@@ -8,6 +8,7 @@ from typing import Optional
 import flask
 
 from testing_results_cache import flask_db
+from testing_results_cache import history_api
 from testing_results_cache import results_api
 
 INSTANCE_PATH = Path(__file__).parent.parent / "instance_dev"
@@ -40,6 +41,7 @@ def create_app() -> flask.Flask:
         SECRET_KEY="dev",
         DATABASE=str(instance_path / "testing_results_cache.db"),
         UPLOAD_FOLDER=str(instance_path / "uploads"),
+        HISTORY_FOLDER=str(instance_path / "history"),
         MAX_CONTENT_LENGTH=16 * 1000 * 1000,  # 16MB
     )
 
@@ -52,5 +54,6 @@ def create_app() -> flask.Flask:
     app.cli.add_command(flask_db.add_user)
 
     app.register_blueprint(results_api.results)
+    app.register_blueprint(history_api.history)
 
     return app
