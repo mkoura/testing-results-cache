@@ -453,20 +453,28 @@ class TestConcurrentUpload:
         """
         db_path = app.config["DATABASE"]
         results: List[bool] = []
+        results_lock = threading.Lock()
+        # The timeout keeps a thread that dies before reaching the barrier
+        # (e.g. on connect) from stalling the rest forever: a timed-out wait
+        # breaks the barrier for everyone, all threads exit, and the length
+        # assert below fails fast instead of hanging CI.
         barrier = threading.Barrier(self.ATTEMPTS)
 
         def _attempt() -> None:
             conn = sqlite3.connect(db_path, timeout=30)
-            barrier.wait()
-            saved = history_cache.save_history_entry(
-                conn=conn, testrun_name="race-testrun", job_id="job1", user_id=1
-            )
-            # save_history_entry does not commit - the caller owns the
-            # transaction (mirroring upload_history), so commit here before
-            # asserting.
-            conn.commit()
-            results.append(saved)
-            conn.close()
+            try:
+                barrier.wait(timeout=30)
+                saved = history_cache.save_history_entry(
+                    conn=conn, testrun_name="race-testrun", job_id="job1", user_id=1
+                )
+                # save_history_entry does not commit - the caller owns the
+                # transaction (mirroring upload_history), so commit here
+                # before asserting.
+                conn.commit()
+                with results_lock:
+                    results.append(saved)
+            finally:
+                conn.close()
 
         threads = [threading.Thread(target=_attempt) for _ in range(self.ATTEMPTS)]
         for t in threads:
