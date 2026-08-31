@@ -1,8 +1,9 @@
 """Tests for the nightly-history dump/list/download endpoints (/history/...).
 
 This is a deliberately separate use case from /results/.../import: no
-parsing, no verdicts, just storing whatever XML the caller sends and
-handing it back by job_id or by a recent time window.
+verdicts are read out, just storing the XML the caller sends and handing
+it back by job_id or by a recent time window. The upload is checked for
+being non-empty and parsable as XML, and nothing more.
 """
 
 import http
@@ -28,6 +29,7 @@ import pytest
 from werkzeug.test import TestResponse  # type: ignore[attr-defined]
 
 from testing_results_cache import history_cache
+from testing_results_cache import junittools
 
 SAMPLE_XML = b"""<?xml version="1.0" encoding="utf-8"?>
 <testsuites>
@@ -42,6 +44,11 @@ time="1.23" timestamp="2026-08-05T01:00:00.000000">
 
 
 OTHER_XML = b'<?xml version="1.0" encoding="utf-8"?>\n<testsuites/>\n'
+
+# pytest writes a raw ESC into the XML when a test's output was coloured. It
+# is not valid XML, and `junittools` sanitizes it, so an upload carrying one
+# has to be accepted.
+ESCAPE_CHAR_XML = SAMPLE_XML.replace(b"Traceback...", b"\x1b[31mTraceback...\x1b[0m")
 
 
 def _upload(
@@ -495,3 +502,183 @@ class TestConcurrentUpload:
         ).fetchone()[0]
         conn.close()
         assert count == 1
+
+
+class TestRejectsUnusableUploads:
+    """An unusable upload must be refused, and refused before any DB work."""
+
+    def test_rejects_empty_file(
+        self, app: flask.Flask, client: flask.testing.FlaskClient, auth_headers: dict
+    ) -> None:
+        resp = _upload(client, auth_headers, "nightly-cli", "job1", content=b"")
+        assert resp.status_code == http.HTTPStatus.BAD_REQUEST
+        assert resp.get_json()["message"] == "Empty file"
+
+        # The slot is still free, and a real report lands in it intact.
+        assert (
+            _upload(client, auth_headers, "nightly-cli", "job1").status_code == http.HTTPStatus.OK
+        )
+        with client.get("/history/nightly-cli/job1/xml", headers=auth_headers) as xml_resp:
+            assert xml_resp.data == SAMPLE_XML
+        assert _tmp_files(app) == []
+
+    def test_rejects_content_that_is_not_xml(
+        self, app: flask.Flask, client: flask.testing.FlaskClient, auth_headers: dict
+    ) -> None:
+        resp = _upload(client, auth_headers, "nightly-dbsync", "job1", content=b"not xml at all")
+        assert resp.status_code == http.HTTPStatus.BAD_REQUEST
+        assert resp.get_json()["message"] == "Not a well-formed XML file"
+
+        assert (
+            _upload(client, auth_headers, "nightly-dbsync", "job1").status_code
+            == http.HTTPStatus.OK
+        )
+        assert _tmp_files(app) == []
+
+    def test_rejects_truncated_xml(
+        self, client: flask.testing.FlaskClient, auth_headers: dict
+    ) -> None:
+        truncated = SAMPLE_XML[: len(SAMPLE_XML) // 2]
+        resp = _upload(client, auth_headers, "nightly", "job1", content=truncated)
+        assert resp.status_code == http.HTTPStatus.BAD_REQUEST
+        assert resp.get_json()["message"] == "Not a well-formed XML file"
+
+    def test_rejects_binary_content(
+        self, client: flask.testing.FlaskClient, auth_headers: dict
+    ) -> None:
+        resp = _upload(client, auth_headers, "nightly", "job2", content=b"\x00\x01\x02\xff")
+        assert resp.status_code == http.HTTPStatus.BAD_REQUEST
+        assert resp.get_json()["message"] == "Not a well-formed XML file"
+
+    def test_a_rejected_upload_does_no_db_work(
+        self,
+        client: flask.testing.FlaskClient,
+        auth_headers: dict,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Validation runs before the insert, so a refused upload never reaches it."""
+        calls: List[dict] = []
+
+        def _spy(**kwargs: object) -> bool:
+            calls.append(kwargs)
+            return True
+
+        monkeypatch.setattr(history_cache, "save_history_entry", _spy)
+        resp = _upload(client, auth_headers, "nightly", "job3", content=b"")
+        assert resp.status_code == http.HTTPStatus.BAD_REQUEST
+        assert calls == []
+
+    def test_rejected_upload_leaves_no_row(
+        self, client: flask.testing.FlaskClient, auth_headers: dict
+    ) -> None:
+        resp = _upload(client, auth_headers, "nightly", "job4", content=b"")
+        assert resp.status_code == http.HTTPStatus.BAD_REQUEST
+
+        with client.get("/history/nightly?days=5", headers=auth_headers) as list_resp:
+            assert list_resp.get_json() == []
+
+    def test_a_read_error_is_a_500_not_a_400(
+        self, client: flask.testing.FlaskClient, auth_headers: dict, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A disk fault is the server's fault. A 400 would have CI drop the run."""
+
+        def _boom(_self: pathlib.Path) -> bytes:
+            err = "Input/output error"
+            raise OSError(err)
+
+        monkeypatch.setattr(pathlib.Path, "read_bytes", _boom)
+        resp = _upload(client, auth_headers, "nightly", "job5")
+        assert resp.status_code == http.HTTPStatus.INTERNAL_SERVER_ERROR
+        assert resp.get_json()["message"] == "Failed to store history XML"
+
+
+class TestAcceptsRealReports:
+    """The checks must not refuse anything a real nightly could send."""
+
+    def test_accepts_a_report_with_pytest_escape_characters(
+        self, client: flask.testing.FlaskClient, auth_headers: dict
+    ) -> None:
+        # The regression a plain `etree.fromstring` would cause.
+        assert (
+            _upload(client, auth_headers, "nightly", "job1", content=ESCAPE_CHAR_XML).status_code
+            == http.HTTPStatus.OK
+        )
+        with client.get("/history/nightly/job1/xml", headers=auth_headers) as xml_resp:
+            assert xml_resp.data == ESCAPE_CHAR_XML
+
+    def test_accepts_non_ascii_characters(
+        self, client: flask.testing.FlaskClient, auth_headers: dict
+    ) -> None:
+        # Pins the bytes read: decoding with the process locale would refuse
+        # this on a server whose locale is not UTF-8.
+        content = SAMPLE_XML.replace(b"test_bar", "test_wystrój_🎯".encode())
+        assert (
+            _upload(client, auth_headers, "nightly", "job2", content=content).status_code
+            == http.HTTPStatus.OK
+        )
+        with client.get("/history/nightly/job2/xml", headers=auth_headers) as xml_resp:
+            assert xml_resp.data == content
+
+    def test_accepts_a_text_node_over_the_libxml2_limit(
+        self, client: flask.testing.FlaskClient, auth_headers: dict
+    ) -> None:
+        # libxml2 caps a text node at 10MB, below the 16MB this service takes,
+        # so without `huge_tree` a big report is refused as malformed.
+        content = SAMPLE_XML.replace(b"Traceback...", b"x" * 10_500_000)
+        assert (
+            _upload(client, auth_headers, "nightly", "job3", content=content).status_code
+            == http.HTTPStatus.OK
+        )
+
+    def test_accepts_well_formed_xml_that_is_not_a_junit_report(
+        self, client: flask.testing.FlaskClient, auth_headers: dict
+    ) -> None:
+        """This route stores XML and never reads verdicts, so it takes any XML."""
+        assert (
+            _upload(client, auth_headers, "nightly", "job4", content=OTHER_XML).status_code
+            == http.HTTPStatus.OK
+        )
+
+
+class TestParsableXml:
+    @pytest.mark.parametrize(
+        ("content", "expected"),
+        [
+            (SAMPLE_XML, True),
+            (ESCAPE_CHAR_XML, True),
+            (OTHER_XML, True),
+            (b"<html><body/></html>", True),
+            (b"", False),
+            (b"   \t\n  ", False),
+            (b"not xml at all", False),
+            (SAMPLE_XML[: len(SAMPLE_XML) // 2], False),
+            (SAMPLE_XML + b"trailing junk", False),
+            (b"<a/><b/>", False),
+            (b"\x00\x01\x02\xff", False),
+        ],
+    )
+    def test_verdict(self, tmp_path: Path, content: bytes, expected: bool) -> None:
+        junit_file = tmp_path / "report.xml"
+        junit_file.write_bytes(content)
+        assert junittools.parsable_xml(junit_file) is expected
+
+    def test_an_os_error_propagates(self, tmp_path: Path) -> None:
+        """It answers "does this parse", never "could I read it"."""
+        with pytest.raises(FileNotFoundError):
+            junittools.parsable_xml(tmp_path / "does-not-exist.xml")
+
+
+class TestMissingHistoryTable:
+    def test_error_names_the_missing_table(
+        self, app: flask.Flask, client: flask.testing.FlaskClient, auth_headers: dict
+    ) -> None:
+        """A client cannot read the server log, so the 500 has to say this."""
+        conn = sqlite3.connect(app.config["DATABASE"])
+        conn.execute("DROP TABLE history")
+        conn.commit()
+        conn.close()
+
+        resp = _upload(client, auth_headers, "nightly", "job1")
+        assert resp.status_code == http.HTTPStatus.INTERNAL_SERVER_ERROR
+        assert "history table does not exist" in resp.get_json()["message"]
+        assert _tmp_files(app) == []

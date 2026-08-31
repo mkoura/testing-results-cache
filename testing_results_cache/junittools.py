@@ -89,3 +89,28 @@ def get_testsuite_data(junit_file: Path) -> common.TestsuiteData:
     testsuite_data = common.TestsuiteData(timestamp=timestamp, tests_verdicts=testcases_data)
 
     return testsuite_data
+
+
+def parsable_xml(junit_file: Path) -> bool:
+    """Check that a file parses as XML. Nothing is read out of it.
+
+    Reads bytes, so that lxml honours the document's own encoding declaration
+    rather than the process locale. Sanitizes first, for the same reason
+    `_sanitize_xml` exists: pytest writes a raw escape character into the XML
+    when a test's output was coloured.
+
+    `huge_tree` lifts libxml2's 10MB per-text-node limit, which is below the
+    16MB this service accepts, so a large report would otherwise be refused as
+    malformed. It does not lift the entity amplification guard.
+    """
+    parser = etree.XMLParser(huge_tree=True, resolve_entities=False)
+
+    try:
+        etree.fromstring(junit_file.read_bytes().replace(b"\033", b"#x1B"), parser)
+    # Only a parse failure means the upload is bad. An OSError is the server's
+    # problem, so it propagates and the caller answers 500 instead of blaming
+    # the file.
+    except etree.XMLSyntaxError:
+        return False
+
+    return True

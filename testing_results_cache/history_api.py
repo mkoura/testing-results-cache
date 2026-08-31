@@ -1,8 +1,9 @@
 """Endpoints for dumping and retrieving raw JUnit XML for nightly test runs.
 
 This is a deliberately separate use case from `/results/.../import`: no
-parsing, no verdicts, just storing whatever XML the caller sends and
-handing it back by job_id or by a recent time window. CI decides when to
+verdicts are read out, just storing the XML the caller sends and handing
+it back by job_id or by a recent time window. The upload is checked for
+being non-empty and parsable as XML, and nothing more. CI decides when to
 call this (e.g. only on a failed nightly) - this service doesn't need to
 know why.
 
@@ -30,6 +31,7 @@ from testing_results_cache import common
 from testing_results_cache import flask_auth
 from testing_results_cache import flask_db
 from testing_results_cache import history_cache
+from testing_results_cache import junittools
 
 DEFAULT_HISTORY_DAYS = 5
 MAX_HISTORY_DAYS = 3650
@@ -66,6 +68,49 @@ def _reject_invalid_segments(*values: str) -> None:
                 f"Invalid path segment {value!r}: only [A-Za-z0-9_.-] "
                 f"(not dots alone), max {MAX_PATH_SEGMENT_LENGTH} chars",
             )
+
+
+def _abort_storage_failure(
+    conn: sqlite3.Connection, err: Exception, testrun_name: str, job_id: str
+) -> NoReturn:
+    """Roll back a failed upload and abort with the most useful message."""
+    flask.current_app.logger.exception(f"Failed to store history XML for {testrun_name}/{job_id}")
+
+    # The insert is uncommitted, so even a failing rollback cannot leave a row
+    # behind - connection teardown discards it. Still worth a log: a rollback
+    # that raises means a sick connection or disk.
+    try:
+        conn.rollback()
+    except Exception:
+        flask.current_app.logger.warning(
+            f"Rollback failed for history upload {testrun_name}/{job_id}", exc_info=True
+        )
+
+    # A client cannot read the log above, so the one deployment mistake it can
+    # actually act on is named in the response instead.
+    if isinstance(err, sqlite3.OperationalError) and "no such table: history" in str(err):
+        _abort_json(500, "The history table does not exist - run the migration from the README")
+
+    _abort_json(500, "Failed to store history XML")
+
+
+def _reject_unusable_upload(upload_file: Path, testrun_name: str, job_id: str) -> None:
+    """Refuse an upload that no consumer could ever read back as a report.
+
+    Logged as well as refused: the access log cannot tell this route's several
+    400s apart, so without a line here a testrun that starts sending unusable
+    reports just stops accumulating history, with nothing on the server saying
+    which one, or why.
+    """
+    if upload_file.stat().st_size == 0:
+        flask.current_app.logger.warning(f"Rejected empty history upload {testrun_name}/{job_id}")
+        _abort_json(400, "Empty file")
+
+    if not junittools.parsable_xml(upload_file):
+        flask.current_app.logger.warning(
+            f"Rejected unparsable history upload {testrun_name}/{job_id}"
+        )
+        _abort_json(400, "Not a well-formed XML file")
 
 
 def _history_file(testrun_name: str, job_id: str) -> Path:
@@ -120,6 +165,7 @@ def upload_history(testrun_name: str, job_id: str) -> dict:
     # un-fsynced file - accepted, not worth the fsync.)
     try:
         file.save(str(tmp_filepath))
+        _reject_unusable_upload(upload_file=tmp_filepath, testrun_name=testrun_name, job_id=job_id)
         saved = history_cache.save_history_entry(
             conn=conn, testrun_name=testrun_name, job_id=job_id, user_id=user_id
         )
@@ -131,20 +177,8 @@ def upload_history(testrun_name: str, job_id: str) -> dict:
     except HTTPException:
         # Never swallow an intentional abort into the generic 500 below.
         raise
-    except Exception:
-        flask.current_app.logger.exception(
-            f"Failed to store history XML for {testrun_name}/{job_id}"
-        )
-        # The insert is uncommitted, so even a failing rollback cannot leave
-        # a row behind - connection teardown discards it. Still worth a log:
-        # a rollback that raises means a sick connection or disk.
-        try:
-            conn.rollback()
-        except sqlite3.Error:
-            flask.current_app.logger.warning(
-                f"Rollback failed for history upload {testrun_name}/{job_id}", exc_info=True
-            )
-        _abort_json(500, "Failed to store history XML")
+    except Exception as err:
+        _abort_storage_failure(conn=conn, err=err, testrun_name=testrun_name, job_id=job_id)
     finally:
         # Janitorial only - never mask the primary outcome with an unlink
         # error. But log it: `missing_ok` already covers the renamed-away
