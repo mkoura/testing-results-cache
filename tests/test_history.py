@@ -495,3 +495,29 @@ class TestConcurrentUpload:
         ).fetchone()[0]
         conn.close()
         assert count == 1
+
+
+class TestRejectsEmptyUpload:
+    def test_rejects_empty_file(
+        self, app: flask.Flask, client: flask.testing.FlaskClient, auth_headers: dict
+    ) -> None:
+        resp = _upload(client, auth_headers, "nightly-cli", "job1", content=b"")
+        assert resp.status_code == http.HTTPStatus.BAD_REQUEST
+        assert resp.get_json()["message"] == "Empty file"
+        assert _tmp_files(app) == []
+
+        # The slot is still free, and a real report lands in it intact.
+        assert (
+            _upload(client, auth_headers, "nightly-cli", "job1").status_code == http.HTTPStatus.OK
+        )
+        with client.get("/history/nightly-cli/job1/xml", headers=auth_headers) as xml_resp:
+            assert xml_resp.data == SAMPLE_XML
+
+    def test_rejected_upload_leaves_no_row(
+        self, client: flask.testing.FlaskClient, auth_headers: dict
+    ) -> None:
+        resp = _upload(client, auth_headers, "nightly-dbsync", "job1", content=b"")
+        assert resp.status_code == http.HTTPStatus.BAD_REQUEST
+
+        with client.get("/history/nightly-dbsync?days=5", headers=auth_headers) as list_resp:
+            assert list_resp.get_json() == []

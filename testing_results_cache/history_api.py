@@ -68,6 +68,18 @@ def _reject_invalid_segments(*values: str) -> None:
             )
 
 
+def _reject_empty_upload(upload_file: Path, testrun_name: str, job_id: str) -> None:
+    """Refuse an empty upload, which would take this testrun and job for good.
+
+    Logged as well as refused: the access log cannot tell this route's several
+    400s apart, so a testrun that starts sending empty reports would otherwise
+    stop accumulating history with nothing on the server saying why.
+    """
+    if upload_file.stat().st_size == 0:
+        flask.current_app.logger.warning(f"Rejected empty history upload {testrun_name}/{job_id}")
+        _abort_json(400, "Empty file")
+
+
 def _history_file(testrun_name: str, job_id: str) -> Path:
     history_folder = Path(flask.current_app.config["HISTORY_FOLDER"])
     return history_folder / testrun_name / f"{job_id}.xml"
@@ -120,6 +132,7 @@ def upload_history(testrun_name: str, job_id: str) -> dict:
     # un-fsynced file - accepted, not worth the fsync.)
     try:
         file.save(str(tmp_filepath))
+        _reject_empty_upload(upload_file=tmp_filepath, testrun_name=testrun_name, job_id=job_id)
         saved = history_cache.save_history_entry(
             conn=conn, testrun_name=testrun_name, job_id=job_id, user_id=user_id
         )
