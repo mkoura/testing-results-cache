@@ -54,6 +54,7 @@ def create_app() -> flask.Flask:
     app.cli.add_command(flask_db.init_db_command)
     app.cli.add_command(flask_db.add_user)
     app.cli.add_command(flask_db.migrate_command)
+    app.cli.add_command(flask_db.prune_history_command)
 
     app.register_blueprint(results_api.results)
     app.register_blueprint(history_api.history)

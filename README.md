@@ -142,10 +142,10 @@ curl -u username:password http://localhost:5000/results/testrun1/pyrerun
 
 Separate from `/results`: stores raw JUnit XML per testrun+job without parsing
 it, so failure history can be inspected later (e.g. by an AI failure-analysis
-step). One upload per testrun+job. Note that history files are never deleted
-automatically; prune old files and `history` table rows manually if disk space
-becomes a concern. A hard crash mid-upload can also leave stale `.upload-*.tmp`
-files under the history folder; they are safe to delete.
+step). One upload per testrun+job. History is not pruned on a schedule; see
+[Pruning old history](#pruning-old-history) below. A hard crash mid-upload can
+leave stale `.upload-*.tmp` files under the history folder; they are safe to
+delete.
 
 Upload the JUnit XML for a nightly job:
 
@@ -164,6 +164,22 @@ Download the stored JUnit XML for a job:
 ```sh
 curl -u username:password http://localhost:5000/history/testrun1/job1/xml
 ```
+
+## Pruning old history
+
+Remove history entries older than a number of days. This deletes both the
+`history` row and its stored XML.
+
+```sh
+flask --app testing_results_cache.app:create_app prune-history --days 90
+```
+
+Use `--dry-run` first to list what would go. The command also reports any
+stored file that no `history` row mentions, which is what a crash between the
+delete and the unlink leaves behind. Those files are safe to delete.
+
+Nothing runs this for you. Put it in a cron job or a systemd timer if the
+history folder needs to stay bounded.
 
 ## Sync-test results cache
 

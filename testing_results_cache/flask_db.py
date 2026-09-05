@@ -1,3 +1,4 @@
+import pathlib
 import sqlite3
 
 import click
@@ -5,6 +6,7 @@ import flask
 from werkzeug import security
 
 from testing_results_cache import migrations_runner
+from testing_results_cache import retention
 from testing_results_cache import users
 
 
@@ -83,3 +85,30 @@ def migrate_command(dry_run: bool) -> None:
 
     for migration in applied:
         click.echo(f"Applied {migration.path.name}")
+
+
+@click.command("prune-history")
+@click.option("--days", type=int, required=True, help="Keep entries newer than this many days.")
+@click.option("--dry-run", is_flag=True, help="List what would go, delete nothing.")
+def prune_history_command(days: int, dry_run: bool) -> None:
+    """Remove stored history older than the given number of days."""
+    history_folder = pathlib.Path(flask.current_app.config["HISTORY_FOLDER"])
+    conn = get_db()
+
+    try:
+        removed = retention.prune(
+            conn=conn, history_folder=history_folder, days=days, dry_run=dry_run
+        )
+    except ValueError as err:
+        raise click.ClickException(str(err)) from err
+
+    verb = "Would remove" if dry_run else "Removed"
+    for entry in removed:
+        click.echo(f"{verb} {entry.testrun_name}/{entry.job_id}")
+    click.echo(f"{verb} {len(removed)} entries older than {days} days.")
+
+    orphans = retention.find_orphans(conn=conn, history_folder=history_folder)
+    if orphans:
+        click.echo(f"{len(orphans)} stored files have no matching row:")
+        for path in orphans:
+            click.echo(f"  {path}")
