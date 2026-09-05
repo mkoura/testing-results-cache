@@ -8,8 +8,8 @@ new upload replaces the old one instead of being rejected as a duplicate.
 
 import logging
 import sqlite3
+from datetime import UTC
 from datetime import datetime
-from datetime import timezone
 from typing import List
 
 from testing_results_cache import common
@@ -27,7 +27,7 @@ def _format_timestamp(value: datetime) -> str:
 
 
 def _parse_timestamp(value: str) -> datetime:
-    return datetime.strptime(value, TIMESTAMP_FORMAT).replace(tzinfo=timezone.utc)
+    return datetime.strptime(value, TIMESTAMP_FORMAT).replace(tzinfo=UTC)
 
 
 def save_sync_results_entry(conn: sqlite3.Connection, version: str, user_id: int) -> None:
@@ -41,7 +41,7 @@ def save_sync_results_entry(conn: sqlite3.Connection, version: str, user_id: int
         "INSERT INTO sync_results(version, user_id, timestamp) VALUES (?,?,?) "
         "ON CONFLICT(version) DO UPDATE SET "
         "user_id = excluded.user_id, timestamp = excluded.timestamp",
-        (version, user_id, _format_timestamp(datetime.now(timezone.utc))),
+        (version, user_id, _format_timestamp(datetime.now(UTC))),
     )
 
 

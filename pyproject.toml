@@ -5,17 +5,20 @@ readme = "README.md"
 maintainers = [
     { name = "IOG Cardano Node Test Engineering", email = "martin.kourim@iohk.io" },
 ]
-requires-python = ">=3.8"
+requires-python = ">=3.12"
 classifiers = [
     "Topic :: Software Development :: Libraries :: Python Modules",
     "Programming Language :: Python :: 3",
     "Intended Audience :: Developers",
 ]
 dynamic = ["version"]
+# Upper bounds pin the major each dependency is tested against. `make
+# update-uv-lock` resolves fresh, so without them a new major lands in the
+# lockfile with no test run behind it.
 dependencies = [
-    "lxml",
-    "flask",
-    "flask-httpauth",
+    "lxml>=5,<7",
+    "flask>=3,<4",
+    "flask-httpauth>=4,<5",
 ]
 
 [project.urls]
