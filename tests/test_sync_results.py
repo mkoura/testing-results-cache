@@ -7,7 +7,9 @@ was stored before, instead of being rejected as a duplicate.
 
 import http
 import io
+import shutil
 import sqlite3
+import subprocess
 import threading
 import zipfile
 from datetime import datetime
@@ -18,6 +20,7 @@ from typing import List
 
 import flask
 import flask.testing
+import pytest
 
 # `types-werkzeug` (pulled in transitively by `types-flask`) still ships stubs for an
 # older werkzeug API and doesn't know about this class, even though it's real at
@@ -25,6 +28,7 @@ import flask.testing
 # runtime-version mismatch, not something introduced here.
 from werkzeug.test import TestResponse  # type: ignore[attr-defined]
 
+from testing_results_cache import sync_results_api
 from testing_results_cache import sync_results_cache
 
 
@@ -53,6 +57,20 @@ def _corrupt_member_zip(good_zip: bytes) -> bytes:
 
 
 CORRUPT_ZIP = _corrupt_member_zip(SAMPLE_ZIP)
+
+
+def _password_protected_zip(tmp_path: Path) -> bytes:
+    """Build a zip with one password-protected member.
+
+    zipfile can only write encrypted zips it can also read, i.e. none - it
+    has no writer for this. Shell out to the `zip` CLI (preinstalled on
+    GitHub-hosted runners) instead.
+    """
+    plain = tmp_path / "payload.txt"
+    plain.write_bytes(b"irrelevant, only the container needs to be encrypted")
+    encrypted = tmp_path / "encrypted.zip"
+    subprocess.run(["zip", "-q", "-j", "-P", "secret", str(encrypted), str(plain)], check=True)
+    return encrypted.read_bytes()
 
 
 def _upload(
@@ -262,6 +280,47 @@ class TestUploadAndDownload:
 
         with client.get("/sync-results/11.1.0/zip", headers=auth_headers) as zip_resp:
             assert zip_resp.data == SAMPLE_ZIP
+
+    def test_rejects_password_protected_zip(
+        self,
+        app: flask.Flask,
+        client: flask.testing.FlaskClient,
+        auth_headers: dict,
+        tmp_path: Path,
+    ) -> None:
+        """A password-protected member must be rejected like any other bad zip.
+
+        testzip() raises RuntimeError for this, not BadZipFile - it still
+        counts as "not a valid zip", since this service can never read the
+        member back either way.
+        """
+        if shutil.which("zip") is None:
+            pytest.skip("zip CLI not available")
+
+        resp = _upload(client, auth_headers, "11.1.0", content=_password_protected_zip(tmp_path))
+        assert resp.status_code == http.HTTPStatus.BAD_REQUEST
+        assert resp.get_json()["message"] == "Not a valid zip file"
+        assert _tmp_files(app) == []
+
+    def test_rejects_zip_over_the_uncompressed_size_cap(
+        self,
+        app: flask.Flask,
+        client: flask.testing.FlaskClient,
+        auth_headers: dict,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A zip over the declared-size cap is rejected before decompressing.
+
+        The real check bounds the cost of validating a zip bomb (tiny on
+        disk, huge once inflated). The cap is lowered here instead of
+        uploading an actually-huge file, so the test stays fast.
+        """
+        monkeypatch.setattr(sync_results_api, "MAX_UNCOMPRESSED_BYTES", 10)
+
+        resp = _upload(client, auth_headers, "11.1.0", content=SAMPLE_ZIP)
+        assert resp.status_code == http.HTTPStatus.BAD_REQUEST
+        assert resp.get_json()["message"] == "Not a valid zip file"
+        assert _tmp_files(app) == []
 
     def test_rejects_traversal_version_on_download(
         self, client: flask.testing.FlaskClient, auth_headers: dict
