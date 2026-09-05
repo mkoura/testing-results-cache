@@ -59,4 +59,17 @@ def create_app() -> flask.Flask:
     app.register_blueprint(history_api.history)
     app.register_blueprint(sync_results_api.sync_results)
 
+    @app.errorhandler(413)
+    def _request_entity_too_large(_exc: Exception) -> flask.Response:
+        # Every other error response in this app is JSON - without this,
+        # Werkzeug's default HTML error page is the one exception, and
+        # nothing records that an oversized upload was rejected.
+        app.logger.warning(
+            f"Rejected an oversized request ({flask.request.content_length} bytes) "
+            f"to {flask.request.path}"
+        )
+        response: flask.Response = flask.jsonify(message="Request too large")
+        response.status_code = 413
+        return response
+
     return app

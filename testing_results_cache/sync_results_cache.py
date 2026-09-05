@@ -6,12 +6,15 @@ when it landed. Unlike history, there is only ever one row per version: a
 new upload replaces the old one instead of being rejected as a duplicate.
 """
 
+import logging
 import sqlite3
 from datetime import datetime
 from datetime import timezone
 from typing import List
 
 from testing_results_cache import common
+
+LOGGER = logging.getLogger(__name__)
 
 # See the comment on sync_results.timestamp in schema.sql - never rely on
 # sqlite3's own datetime adapter/converter for this column. Same format as
@@ -50,7 +53,14 @@ def sync_results_exists(conn: sqlite3.Connection, version: str) -> bool:
 
 
 def list_sync_results(conn: sqlite3.Connection) -> List[common.SyncResultsEntry]:
-    """List every stored version's sync-results entry, newest first."""
+    """List every stored version's sync-results entry, newest first.
+
+    A row with an unparseable timestamp is skipped rather than failing the
+    whole listing - one corrupted row should not also hide every other
+    version's entry from a caller who has nothing to do with it. It is
+    still logged by name, so an operator doesn't need a table scan to find
+    it.
+    """
     cur = conn.cursor()
     cur.execute("SELECT version, timestamp FROM sync_results ORDER BY timestamp DESC")
     rows = cur.fetchall()
@@ -58,10 +68,8 @@ def list_sync_results(conn: sqlite3.Connection) -> List[common.SyncResultsEntry]
     for version, timestamp in rows:
         try:
             parsed = _parse_timestamp(timestamp)
-        except ValueError as exc:
-            # One bad row 500s the whole listing - name it, so the operator
-            # doesn't need a table scan to find it.
-            msg = f"Malformed timestamp {timestamp!r} for version {version}"
-            raise ValueError(msg) from exc
+        except ValueError:
+            LOGGER.warning(f"Skipping malformed timestamp {timestamp!r} for version {version}")
+            continue
         entries.append(common.SyncResultsEntry(version=version, timestamp=parsed))
     return entries
