@@ -1,5 +1,6 @@
 import hashlib
 import random
+import re
 import string
 from pathlib import Path
 from typing import List
@@ -19,7 +20,33 @@ from testing_results_cache import users
 # a pytest nodeid path segment is at most "file.py::ClassName"
 MAX_FILE_CLASS_PARTS = 2
 
+MAX_PATH_SEGMENT_LENGTH = 200
+# Dots are allowed so real-world testrun names like "node-8.5.0" work, but a
+# segment of dots only ("..", ".") is rejected in `_valid_path_segment`.
+_SAFE_SEGMENT_RE = re.compile(r"[A-Za-z0-9_.-]+")
+
 results = flask.Blueprint("results", __name__)
+
+
+def _valid_path_segment(value: str) -> bool:
+    # fullmatch, not match: `$` in a pattern would still accept a trailing
+    # newline ("job1%0A" in the URL), fullmatch requires the whole string.
+    return (
+        len(value) <= MAX_PATH_SEGMENT_LENGTH
+        and _SAFE_SEGMENT_RE.fullmatch(value) is not None
+        and value.strip(".") != ""
+    )
+
+
+def _reject_invalid_segments(*values: str) -> None:
+    for value in values:
+        if not _valid_path_segment(value):
+            response = flask.jsonify(
+                message=f"Invalid path segment {value!r}: only [A-Za-z0-9_.-] "
+                f"(not dots alone), max {MAX_PATH_SEGMENT_LENGTH} chars"
+            )
+            response.status_code = 400
+            flask.abort(response)
 
 
 def checksum(filename: Path, blocksize: int = 65536) -> str:
@@ -84,6 +111,8 @@ def import_testrun(junit_file: Path, testrun_name: str, user_id: int) -> int:
 @flask_auth.auth.login_required
 def import_results(testrun_name: str, job_id: str) -> dict:
     """Upload a JUnit XML file for a given testrun."""
+    _reject_invalid_segments(testrun_name, job_id)
+
     if "junitxml" not in flask.request.files:
         response = flask.jsonify(message="No file part")
         response.status_code = 400
