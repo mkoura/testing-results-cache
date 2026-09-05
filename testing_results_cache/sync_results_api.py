@@ -139,6 +139,16 @@ def _abort_storage_failure(version: str) -> NoReturn:
     _abort_json(500, "Failed to store sync results")
 
 
+def _abort_read_failure(context: str) -> NoReturn:
+    # Only DB errors land here: the upload route already has its own
+    # sqlite3.OperationalError handling for lock contention, but the two GET
+    # routes had none - an unrun migration surfaced as an unhandled
+    # exception, breaking the JSON-error contract every other response on
+    # this blueprint keeps (Werkzeug's default HTML page, no logging).
+    flask.current_app.logger.exception(f"Failed to read sync results ({context})")
+    _abort_json(500, "Failed to read sync results")
+
+
 def _finalize_upload_disk_state(
     version: str,
     filepath: Path,
@@ -342,7 +352,10 @@ def upload_sync_results(version: str) -> dict:
 def list_sync_results() -> List[dict]:
     """List every version that currently has a stored sync-results zip."""
     conn = flask_db.get_db()
-    entries = sync_results_cache.list_sync_results(conn=conn)
+    try:
+        entries = sync_results_cache.list_sync_results(conn=conn)
+    except sqlite3.Error:
+        _abort_read_failure("listing")
     return [{"version": e.version, "timestamp": e.timestamp.isoformat()} for e in entries]
 
 
@@ -353,7 +366,11 @@ def get_sync_results_zip(version: str) -> flask.Response:
     _reject_invalid_version(version)
 
     conn = flask_db.get_db()
-    if not sync_results_cache.sync_results_exists(conn=conn, version=version):
+    try:
+        exists = sync_results_cache.sync_results_exists(conn=conn, version=version)
+    except sqlite3.Error:
+        _abort_read_failure(version)
+    if not exists:
         _abort_json(404, "No sync results found for this version")
 
     filepath = _sync_results_file(version=version)
