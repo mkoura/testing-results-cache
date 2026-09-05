@@ -2,7 +2,7 @@ from datetime import datetime
 from typing import List
 from typing import NamedTuple
 
-# JUnit XML is the only upload format accepted anywhere in the service.
+# The only upload format /results and /history accept.
 ALLOWED_EXTENSIONS = frozenset({".xml"})
 
 # The only upload format the sync-results endpoint accepts.

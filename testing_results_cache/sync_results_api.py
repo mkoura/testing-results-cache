@@ -275,13 +275,14 @@ def upload_sync_results(version: str) -> dict:
     #
     # The rename can still land before the commit that's meant to confirm
     # it fails (a concurrent reader's transaction blocks only the commit,
-    # not the earlier insert or the rename - a lock type this endpoint's
-    # own TestLockContention test doesn't exercise, since it uses a writer
-    # lock that blocks the insert instead). Losing the previous good zip to
-    # an upload that was never actually recorded would defeat the entire
-    # point of validating first, so any existing file is moved aside before
-    # the rename and only discarded once the commit actually lands -
-    # `_finalize_upload_disk_state` puts it back otherwise.
+    # not the earlier insert or the rename - see TestLockContention's two
+    # reader-lock tests, distinct from its original writer-lock test which
+    # blocks the insert instead and never reaches this path). Losing the
+    # previous good zip to an upload that was never actually recorded
+    # would defeat the entire point of validating first, so any existing
+    # file is moved aside before the rename and only discarded once the
+    # commit actually lands - `_finalize_upload_disk_state` puts it back
+    # otherwise.
     committed = False
     entered_disk_phase = False
     had_previous_file = False
@@ -375,9 +376,14 @@ def get_sync_results_zip(version: str) -> flask.Response:
 
     filepath = _sync_results_file(version=version)
     if not filepath.is_file():
-        # DB says yes, disk says no - that's server-side data loss, not a
-        # client error. Log it loudly; the 404 alone would hide the
-        # distinction from the operator.
+        # DB says yes, disk says no - usually server-side data loss, not a
+        # client error, so log it loudly; the 404 alone would hide the
+        # distinction from the operator. There is one narrow, self-healing
+        # exception: an overwrite in upload_sync_results moves the old file
+        # to <name>.prev, then renames the new one into place - a request
+        # landing in that microsecond gap sees a real but transient miss,
+        # not data loss. Check for a matching .prev file before treating
+        # this log line as an incident.
         flask.current_app.logger.error(
             f"Sync-results DB row exists for {version} but file {filepath} is missing"
         )

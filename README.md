@@ -183,7 +183,13 @@ upload for a version replaces whatever was stored for it before, rather than
 being rejected as a duplicate. Entries for older versions are never pruned
 automatically; remove old rows/files manually if disk space becomes a
 concern. A hard crash mid-upload can also leave stale `.upload-*.tmp` files
-under the sync-results folder; they are safe to delete.
+under the sync-results folder; they are safe to delete. A hard crash can also
+leave a `<version>.zip.prev` file: this endpoint moves an existing zip aside
+to that name before replacing it, and only deletes it once the replacement is
+confirmed stored, so a crash at exactly that point can leave it behind. Check
+that `<version>.zip` itself is present and correct before deleting the
+`.prev` file - if `<version>.zip` is missing or corrupt, `.prev` is the last
+good copy.
 
 Upload the results zip for a version:
 
