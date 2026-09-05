@@ -102,6 +102,7 @@ For Caddy, the `/etc/caddy/Caddyfile` would look like
 tcache-3-74-115-22.nip.io {
         reverse_proxy /results/* 127.0.0.1:8000
         reverse_proxy /history/* 127.0.0.1:8000
+        reverse_proxy /sync-results 127.0.0.1:8000
         reverse_proxy /sync-results/* 127.0.0.1:8000
 }
 ```
