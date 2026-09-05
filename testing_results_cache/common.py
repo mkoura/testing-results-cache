@@ -5,6 +5,9 @@ from typing import NamedTuple
 # JUnit XML is the only upload format accepted anywhere in the service.
 ALLOWED_EXTENSIONS = frozenset({".xml"})
 
+# The only upload format the sync-results endpoint accepts.
+ALLOWED_SYNC_RESULTS_EXTENSIONS = frozenset({".zip"})
+
 
 class VerdictValues:
     """Verdict values."""
@@ -38,4 +41,17 @@ class HistoryEntry(NamedTuple):
     """
 
     job_id: str
+    timestamp: datetime
+
+
+class SyncResultsEntry(NamedTuple):
+    """Record that a sync-results zip exists for a node version, and when it landed.
+
+    Unlike HistoryEntry, there is only ever one row per version: a new
+    upload replaces the old one instead of being rejected as a duplicate.
+    `timestamp` is always tz-aware UTC, attached by
+    `sync_results_cache._parse_timestamp` when rows are read back.
+    """
+
+    version: str
     timestamp: datetime
