@@ -11,9 +11,9 @@ import pathlib
 import sqlite3
 import tempfile
 import threading
+from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
-from datetime import timezone
 from pathlib import Path
 from typing import List
 
@@ -82,7 +82,7 @@ class TestUploadAndDownload:
         # comment in schema.sql for the converter bug this guards against.
         timestamp = datetime.fromisoformat(entries[0]["timestamp"])
         assert timestamp.utcoffset() == timedelta(0)
-        assert abs(datetime.now(timezone.utc) - timestamp) < timedelta(minutes=1)
+        assert abs(datetime.now(UTC) - timestamp) < timedelta(minutes=1)
 
         with client.get("/history/nightly-dbsync/2026-08-05/xml", headers=auth_headers) as xml_resp:
             assert xml_resp.status_code == http.HTTPStatus.OK
@@ -232,9 +232,7 @@ class TestTimeWindow:
         self, app: flask.Flask, client: flask.testing.FlaskClient, auth_headers: dict
     ) -> None:
         _upload(client, auth_headers, "nightly-dbsync", "old-job")
-        _set_timestamp(
-            app.config["DATABASE"], "old-job", datetime.now(timezone.utc) - timedelta(days=30)
-        )
+        _set_timestamp(app.config["DATABASE"], "old-job", datetime.now(UTC) - timedelta(days=30))
 
         resp = client.get("/history/nightly-dbsync?days=5", headers=auth_headers)
         assert resp.get_json() == []
@@ -244,9 +242,7 @@ class TestTimeWindow:
     ) -> None:
         _upload(client, auth_headers, "nightly-dbsync", "job-a")
         _upload(client, auth_headers, "nightly-dbsync", "job-b")
-        _set_timestamp(
-            app.config["DATABASE"], "job-a", datetime.now(timezone.utc) - timedelta(days=2)
-        )
+        _set_timestamp(app.config["DATABASE"], "job-a", datetime.now(UTC) - timedelta(days=2))
 
         resp = client.get("/history/nightly-dbsync?days=5", headers=auth_headers)
         job_ids = [entry["job_id"] for entry in resp.get_json()]
@@ -258,9 +254,7 @@ class TestTimeWindow:
         """No `days` param - the most common real-world call - defaults to 5 days."""
         _upload(client, auth_headers, "nightly-dbsync", "fresh-job")
         _upload(client, auth_headers, "nightly-dbsync", "old-job")
-        _set_timestamp(
-            app.config["DATABASE"], "old-job", datetime.now(timezone.utc) - timedelta(days=6)
-        )
+        _set_timestamp(app.config["DATABASE"], "old-job", datetime.now(UTC) - timedelta(days=6))
 
         resp = client.get("/history/nightly-dbsync", headers=auth_headers)
         assert resp.status_code == http.HTTPStatus.OK
