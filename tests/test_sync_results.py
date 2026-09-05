@@ -59,6 +59,30 @@ def _corrupt_member_zip(good_zip: bytes) -> bytes:
 CORRUPT_ZIP = _corrupt_member_zip(SAMPLE_ZIP)
 
 
+def _invalid_utf8_filename_zip() -> bytes:
+    """Build a zip with a non-ASCII filename containing invalid UTF-8 bytes.
+
+    zipfile's writer clears a manually-set UTF-8 flag bit for an ASCII-only
+    filename, so a genuinely non-ASCII name is needed to make it set the
+    flag itself - then one byte of the encoded name is corrupted, in both
+    the local header and the central directory, without touching the flag.
+    """
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as zf:
+        zf.writestr("café.json", b"{}")
+    data = bytearray(buffer.getvalue())
+
+    encoded_name = "café.json".encode()
+    start = 0
+    while True:
+        idx = data.find(encoded_name, start)
+        if idx == -1:
+            break
+        data[idx + 3] = 0xFF  # corrupt the continuation byte of "é"
+        start = idx + 1
+    return bytes(data)
+
+
 def _password_protected_zip(tmp_path: Path) -> bytes:
     """Build a zip with one password-protected member.
 
@@ -322,6 +346,41 @@ class TestUploadAndDownload:
         assert resp.get_json()["message"] == "Not a valid zip file"
         assert _tmp_files(app) == []
 
+    def test_rejects_zip_with_invalid_utf8_filename(
+        self, app: flask.Flask, client: flask.testing.FlaskClient, auth_headers: dict
+    ) -> None:
+        """A non-ASCII filename with invalid UTF-8 bytes must not 500.
+
+        zipfile.ZipFile()'s constructor raises UnicodeDecodeError for this,
+        not testzip() - a different call site, so it needs its own except
+        clause rather than relying on the one around testzip().
+        """
+        resp = _upload(client, auth_headers, "11.1.0", content=_invalid_utf8_filename_zip())
+        assert resp.status_code == http.HTTPStatus.BAD_REQUEST
+        assert resp.get_json()["message"] == "Not a valid zip file"
+        assert _tmp_files(app) == []
+
+    def test_rejects_zip_over_the_member_count_cap(
+        self,
+        app: flask.Flask,
+        client: flask.testing.FlaskClient,
+        auth_headers: dict,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Many trivial members costs real CPU to check even at 0 bytes each.
+
+        The byte-size cap alone doesn't bound this - 180,000 empty members
+        measured at ~1.5s of CPU in the review that found this. The cap is
+        lowered here instead of uploading that many members, so the test
+        stays fast.
+        """
+        monkeypatch.setattr(sync_results_api, "MAX_ZIP_MEMBERS", 1)
+
+        resp = _upload(client, auth_headers, "11.1.0", content=SAMPLE_ZIP)
+        assert resp.status_code == http.HTTPStatus.BAD_REQUEST
+        assert resp.get_json()["message"] == "Not a valid zip file"
+        assert _tmp_files(app) == []
+
     def test_rejects_traversal_version_on_download(
         self, client: flask.testing.FlaskClient, auth_headers: dict
     ) -> None:
@@ -400,6 +459,26 @@ class TestListOrdering:
         versions = [entry["version"] for entry in resp.get_json()]
         assert versions == ["11.0.1", "11.1.0"]
 
+    def test_a_malformed_timestamp_is_skipped_not_fatal(
+        self, app: flask.Flask, client: flask.testing.FlaskClient, auth_headers: dict
+    ) -> None:
+        """One bad row must not hide every other version from the listing."""
+        _upload(client, auth_headers, "11.0.1")
+        _upload(client, auth_headers, "11.1.0")
+
+        conn = sqlite3.connect(app.config["DATABASE"])
+        conn.execute(
+            "UPDATE sync_results SET timestamp = 'not-a-real-timestamp' WHERE version = ?",
+            ("11.0.1",),
+        )
+        conn.commit()
+        conn.close()
+
+        resp = client.get("/sync-results", headers=auth_headers)
+        assert resp.status_code == http.HTTPStatus.OK
+        versions = [entry["version"] for entry in resp.get_json()]
+        assert versions == ["11.1.0"]
+
 
 class TestLockContention:
     def test_returns_503_not_500_when_the_db_is_locked(
@@ -455,3 +534,80 @@ class TestLockContention:
 
         with client.get("/sync-results/11.1.0/zip", headers=auth_headers) as zip_resp:
             assert zip_resp.data == SAMPLE_ZIP
+
+    def test_survives_a_commit_failure_after_the_rename_has_landed(
+        self, app: flask.Flask, client: flask.testing.FlaskClient, auth_headers: dict
+    ) -> None:
+        """A commit failure after the rename must not destroy the old zip.
+
+        Different lock type from the test above, and that difference is
+        the point: a reader's transaction (BEGIN, then only a SELECT) is
+        compatible with this handler's own insert, so the insert and the
+        rename both succeed and only the commit blocks. Left unhandled,
+        that would mean the previous good zip is gone even though the
+        upload that replaced it was never actually recorded - the client
+        would see a safe-looking 503 while data was actually lost.
+        """
+        first = _upload(client, auth_headers, "11.1.0")
+        assert first.status_code == http.HTTPStatus.OK
+
+        db_path = app.config["DATABASE"]
+        reader = sqlite3.connect(db_path, timeout=1)
+        reader.execute("BEGIN")
+        reader.execute("SELECT count(*) FROM sync_results").fetchone()
+        try:
+            resp = _upload(client, auth_headers, "11.1.0", content=OTHER_ZIP)
+        finally:
+            reader.close()
+
+        assert resp.status_code == http.HTTPStatus.SERVICE_UNAVAILABLE
+
+        with client.get("/sync-results/11.1.0/zip", headers=auth_headers) as zip_resp:
+            assert zip_resp.data == SAMPLE_ZIP
+
+        # No backup file left lying around either.
+        leftover = list(Path(app.config["SYNC_RESULTS_FOLDER"]).glob("*.prev"))
+        assert leftover == []
+
+    def test_commit_failure_on_a_brand_new_version_leaves_no_orphan(
+        self, app: flask.Flask, client: flask.testing.FlaskClient, auth_headers: dict
+    ) -> None:
+        """Same race as above, but with nothing previously stored to restore.
+
+        The rename can still land before the commit fails, so without this
+        the version would end up with a file on disk, no database row, a
+        permanent 404 on download, and nothing in the listing either.
+        """
+        db_path = app.config["DATABASE"]
+        reader = sqlite3.connect(db_path, timeout=1)
+        reader.execute("BEGIN")
+        reader.execute("SELECT count(*) FROM sync_results").fetchone()
+        try:
+            resp = _upload(client, auth_headers, "99.9.9")
+        finally:
+            reader.close()
+
+        assert resp.status_code == http.HTTPStatus.SERVICE_UNAVAILABLE
+
+        sync_results_folder = Path(app.config["SYNC_RESULTS_FOLDER"])
+        assert list(sync_results_folder.iterdir()) == []
+
+        listing = client.get("/sync-results", headers=auth_headers).get_json()
+        assert listing == []
+
+
+class TestUploadSizeLimit:
+    def test_oversized_upload_is_413_json_not_html(
+        self, client: flask.testing.FlaskClient, auth_headers: dict
+    ) -> None:
+        """Confirm the 413 error handler returns JSON, not Werkzeug's HTML page.
+
+        MAX_CONTENT_LENGTH is enforced app-wide by Werkzeug, before this
+        blueprint's own code ever runs - this is app.py's error handler for
+        it, not sync_results_api.py, so a request through this endpoint is
+        just how it's exercised here.
+        """
+        oversized = b"0" * (17 * 1000 * 1000)  # just over the 16MB cap
+        resp = _upload(client, auth_headers, "11.1.0", content=oversized)
+        assert resp.status_code == http.HTTPStatus.REQUEST_ENTITY_TOO_LARGE
+        assert resp.get_json()["message"] == "Request too large"
