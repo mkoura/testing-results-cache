@@ -8,6 +8,7 @@ was stored before, instead of being rejected as a duplicate.
 import http
 import io
 import sqlite3
+import threading
 import zipfile
 from datetime import datetime
 from datetime import timedelta
@@ -37,6 +38,21 @@ def _make_zip(*, node_sync_results: bytes = b'{"tag_no1": "11.1.0"}') -> bytes:
 
 SAMPLE_ZIP = _make_zip()
 OTHER_ZIP = _make_zip(node_sync_results=b'{"tag_no1": "11.1.0", "note": "rerun"}')
+
+
+def _corrupt_member_zip(good_zip: bytes) -> bytes:
+    """Build a zip that is corrupt but still looks intact at a glance.
+
+    Passes zipfile.is_zipfile() (EOCD record intact, near the end of the
+    file) but fails zipfile.testzip() (a payload byte flipped early in the
+    file, corrupting one member's CRC).
+    """
+    corrupted = bytearray(good_zip)
+    corrupted[40] ^= 0xFF
+    return bytes(corrupted)
+
+
+CORRUPT_ZIP = _corrupt_member_zip(SAMPLE_ZIP)
 
 
 def _upload(
@@ -206,6 +222,35 @@ class TestUploadAndDownload:
         assert resp.get_json()["message"] == "Not a valid zip file"
         assert _tmp_files(app) == []
 
+    def test_rejects_zip_with_a_corrupted_member(
+        self, app: flask.Flask, client: flask.testing.FlaskClient, auth_headers: dict
+    ) -> None:
+        """Reject a corrupt member even though is_zipfile() alone would accept it.
+
+        zipfile.is_zipfile() only checks the end-of-central-directory
+        record, not each member's CRC. A corrupt-but-EOCD-shaped upload
+        must still be rejected, since there is no dedup fallback here to
+        protect a previously-good upload.
+        """
+        assert zipfile.is_zipfile(io.BytesIO(CORRUPT_ZIP))
+
+        resp = _upload(client, auth_headers, "11.1.0", content=CORRUPT_ZIP)
+        assert resp.status_code == http.HTTPStatus.BAD_REQUEST
+        assert resp.get_json()["message"] == "Not a valid zip file"
+        assert _tmp_files(app) == []
+
+    def test_corrupted_member_does_not_overwrite_existing_upload(
+        self, client: flask.testing.FlaskClient, auth_headers: dict
+    ) -> None:
+        first = _upload(client, auth_headers, "11.1.0")
+        assert first.status_code == http.HTTPStatus.OK
+
+        bad = _upload(client, auth_headers, "11.1.0", content=CORRUPT_ZIP)
+        assert bad.status_code == http.HTTPStatus.BAD_REQUEST
+
+        with client.get("/sync-results/11.1.0/zip", headers=auth_headers) as zip_resp:
+            assert zip_resp.data == SAMPLE_ZIP
+
     def test_bad_content_does_not_overwrite_existing_upload(
         self, client: flask.testing.FlaskClient, auth_headers: dict
     ) -> None:
@@ -295,3 +340,59 @@ class TestListOrdering:
         resp = client.get("/sync-results", headers=auth_headers)
         versions = [entry["version"] for entry in resp.get_json()]
         assert versions == ["11.0.1", "11.1.0"]
+
+
+class TestLockContention:
+    def test_returns_503_not_500_when_the_db_is_locked(
+        self, app: flask.Flask, client: flask.testing.FlaskClient, auth_headers: dict
+    ) -> None:
+        """Surface database lock contention as a retryable 503, not a 500.
+
+        A concurrent writer elsewhere in the service (a /results import, a
+        /history upload, another sync-results upload) can hold the write
+        lock long enough that this request's own connection times out
+        acquiring it. That must not touch the version's already-stored
+        good zip either.
+
+        Uses a real second connection holding a real file-level sqlite
+        lock, not a mock - the same style as history_cache's own
+        TestConcurrentUpload, just holding the lock instead of racing it.
+        """
+        first = _upload(client, auth_headers, "11.1.0")
+        assert first.status_code == http.HTTPStatus.OK
+
+        db_path = app.config["DATABASE"]
+        lock_acquired = threading.Event()
+        release_lock = threading.Event()
+
+        def _hold_write_lock() -> None:
+            conn = sqlite3.connect(db_path, timeout=1)
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                conn.execute(
+                    "UPDATE sync_results SET user_id = user_id WHERE version = ?", ("11.1.0",)
+                )
+                lock_acquired.set()
+                # A timeout here (rather than an unbounded wait) keeps a
+                # test failure from hanging CI if the assertions below
+                # never reach release_lock.set().
+                release_lock.wait(timeout=30)
+                conn.rollback()
+            finally:
+                conn.close()
+
+        holder = threading.Thread(target=_hold_write_lock)
+        holder.start()
+        try:
+            assert lock_acquired.wait(timeout=5), "lock-holding thread never acquired the lock"
+
+            resp = _upload(client, auth_headers, "11.1.0", content=OTHER_ZIP)
+        finally:
+            release_lock.set()
+            holder.join(timeout=30)
+
+        assert resp.status_code == http.HTTPStatus.SERVICE_UNAVAILABLE
+        assert resp.headers.get("Retry-After") == "5"
+
+        with client.get("/sync-results/11.1.0/zip", headers=auth_headers) as zip_resp:
+            assert zip_resp.data == SAMPLE_ZIP

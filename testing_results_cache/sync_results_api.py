@@ -16,9 +16,11 @@ import re
 import sqlite3
 import tempfile
 import zipfile
+import zlib
 from pathlib import Path
 from typing import List
 from typing import NoReturn
+from typing import Optional
 
 import flask
 from werkzeug.exceptions import HTTPException
@@ -36,11 +38,29 @@ _SAFE_SEGMENT_RE = re.compile(r"[A-Za-z0-9_.-]+")
 sync_results = flask.Blueprint("sync_results", __name__)
 
 
-def _abort_json(status_code: int, message: str) -> NoReturn:
+def _abort_json(status_code: int, message: str, headers: Optional[dict] = None) -> NoReturn:
     """Abort the request with a JSON error body."""
     response = flask.jsonify(message=message)
     response.status_code = status_code
+    if headers:
+        response.headers.update(headers)
     flask.abort(response)
+
+
+def _valid_zip(path: Path) -> bool:
+    """Check the file is a real, readable zip, not just an EOCD signature.
+
+    zipfile.is_zipfile() alone only scans for the end-of-central-directory
+    signature - a truncated or CRC-corrupted zip can still pass it. There
+    is no reject-as-duplicate fallback here (see the module docstring), so
+    a corrupt-but-EOCD-shaped upload would otherwise silently overwrite a
+    good stored zip.
+    """
+    try:
+        with zipfile.ZipFile(path) as zf:
+            return bool(zf.namelist()) and zf.testzip() is None
+    except (zipfile.BadZipFile, zlib.error, EOFError, OSError):
+        return False
 
 
 def _valid_path_segment(value: str) -> bool:
@@ -65,6 +85,36 @@ def _reject_invalid_version(version: str) -> None:
 def _sync_results_file(version: str) -> Path:
     folder = Path(flask.current_app.config["SYNC_RESULTS_FOLDER"])
     return folder / f"{version}.zip"
+
+
+def _rollback(conn: sqlite3.Connection, version: str) -> None:
+    try:
+        conn.rollback()
+    except sqlite3.Error:
+        flask.current_app.logger.warning(
+            f"Rollback failed for sync-results upload {version}", exc_info=True
+        )
+
+
+def _abort_storage_failure(version: str) -> NoReturn:
+    flask.current_app.logger.exception(f"Failed to store sync results for {version}")
+    _abort_json(500, "Failed to store sync results")
+
+
+def _fsync_path(path: Path) -> None:
+    """Flush a just-written file's data to disk before it gets renamed into place."""
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _reject_invalid_zip_content(path: Path) -> None:
+    if path.stat().st_size == 0:
+        _abort_json(400, "Empty file")
+    if not _valid_zip(path):
+        _abort_json(400, "Not a valid zip file")
 
 
 @sync_results.route("/sync-results/<version>", methods=["PUT", "POST"])
@@ -104,17 +154,21 @@ def upload_sync_results(version: str) -> dict:
     # There is no reject-as-duplicate fallback here like /history has - a
     # bad upload would overwrite and destroy the last good one for this
     # version, with no way back. So the content is validated (non-empty,
-    # actually a zip) before either the DB row or the real file is ever
-    # touched, and the DB write only commits after the real rename
-    # succeeds, so a crash or a failed rename can never leave a committed
-    # row pointing at a missing/stale file.
+    # actually a zip, readable end to end) before either the DB row or the
+    # real file is ever touched, and the write is fsynced before the
+    # rename - unlike /history, a crash losing an un-fsynced *new* upload
+    # here would leave the *previous* good copy destroyed, not just absent.
+    #
+    # The DB write only commits after the rename succeeds, which rules out
+    # a committed row pointing at a missing file on a brand-new version.
+    # It does NOT fully rule out staleness on an overwrite: a crash in the
+    # narrow window after the rename lands but before commit leaves the
+    # new file on disk paired with the previous upload's row (stale
+    # timestamp/user_id). Accepted - not worth a two-phase commit for it.
     try:
         file.save(str(tmp_filepath))
-
-        if tmp_filepath.stat().st_size == 0:
-            _abort_json(400, "Empty file")
-        if not zipfile.is_zipfile(tmp_filepath):
-            _abort_json(400, "Not a valid zip file")
+        _fsync_path(tmp_filepath)
+        _reject_invalid_zip_content(tmp_filepath)
 
         sync_results_cache.save_sync_results_entry(conn=conn, version=version, user_id=user_id)
         tmp_filepath.rename(filepath)
@@ -122,15 +176,21 @@ def upload_sync_results(version: str) -> dict:
     except HTTPException:
         # Never swallow an intentional abort into the generic 500 below.
         raise
+    except sqlite3.OperationalError as exc:
+        # A concurrent writer elsewhere in the service (a /results import,
+        # a /history upload, another sync-results upload) can hold the
+        # write lock long enough to time out here. Transient, so tell the
+        # caller to retry rather than reporting a hard failure. Any other
+        # OperationalError falls through to the same handling as the
+        # generic Exception branch below.
+        _rollback(conn, version)
+        if "database is locked" in str(exc):
+            flask.current_app.logger.warning(f"Sync-results upload for {version} hit database lock")
+            _abort_json(503, "Server busy, try again", headers={"Retry-After": "5"})
+        _abort_storage_failure(version)
     except Exception:
-        flask.current_app.logger.exception(f"Failed to store sync results for {version}")
-        try:
-            conn.rollback()
-        except sqlite3.Error:
-            flask.current_app.logger.warning(
-                f"Rollback failed for sync-results upload {version}", exc_info=True
-            )
-        _abort_json(500, "Failed to store sync results")
+        _rollback(conn, version)
+        _abort_storage_failure(version)
     finally:
         # Janitorial only - never mask the primary outcome with an unlink
         # error. But log it: a successful rename already moved the file

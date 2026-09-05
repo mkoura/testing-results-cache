@@ -46,7 +46,8 @@ flask --app testing_results_cache.app:create_app init-db
 ```
 
 **Note for existing deployments:** `init-db` drops and recreates all tables.
-To add the `history` table without losing data, run the following instead:
+To add the `history` and `sync_results` tables without losing data, run the
+following instead:
 
 ```sh
 sqlite3 instance/testing_results_cache.db <<'EOF'
@@ -57,6 +58,11 @@ CREATE TABLE IF NOT EXISTS history (
     user_id INTEGER,
     timestamp TEXT NOT NULL,
     UNIQUE (testrun_name, job_id)
+);
+CREATE TABLE IF NOT EXISTS sync_results (
+    version TEXT PRIMARY KEY,
+    user_id INTEGER,
+    timestamp TEXT NOT NULL
 );
 EOF
 ```
@@ -96,6 +102,7 @@ For Caddy, the `/etc/caddy/Caddyfile` would look like
 tcache-3-74-115-22.nip.io {
         reverse_proxy /results/* 127.0.0.1:8000
         reverse_proxy /history/* 127.0.0.1:8000
+        reverse_proxy /sync-results/* 127.0.0.1:8000
 }
 ```
 
@@ -164,6 +171,35 @@ Download the stored JUnit XML for a job:
 
 ```sh
 curl -u username:password http://localhost:5000/history/testrun1/job1/xml
+```
+
+## Sync-test results cache
+
+Separate again from `/results` and `/history`: caches a zip of cardano-sync-tests
+results (JSON metrics plus rendered graphs) per cardano-node version, with no
+parsing. Unlike `/history`, there is only ever one entry per version - a new
+upload for a version replaces whatever was stored for it before, rather than
+being rejected as a duplicate. Entries for older versions are never pruned
+automatically; remove old rows/files manually if disk space becomes a
+concern. A hard crash mid-upload can also leave stale `.upload-*.tmp` files
+under the sync-results folder; they are safe to delete.
+
+Upload the results zip for a version:
+
+```sh
+curl -X PUT --fail-with-body -u username:password http://localhost:5000/sync-results/11.1.0 -F "syncresults=@/home/user/path/to/sync_results.zip"
+```
+
+List every version that currently has a stored entry:
+
+```sh
+curl -u username:password http://localhost:5000/sync-results
+```
+
+Download the stored zip for a version:
+
+```sh
+curl -u username:password http://localhost:5000/sync-results/11.1.0/zip
 ```
 
 ## Run tests
