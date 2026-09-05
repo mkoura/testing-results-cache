@@ -31,6 +31,15 @@ time="1.23" timestamp="2026-08-05T01:00:00.000000">
 </testsuites>
 """
 
+RERUN_XML = b"""<?xml version="1.0" encoding="utf-8"?>
+<testsuites>
+<testsuite name="pytest" errors="0" failures="0" skipped="0" tests="1" \
+time="1.23" timestamp="2026-08-05T02:00:00.000000">
+<testcase classname="tests.test_foo" name="test_other" time="0.1"/>
+</testsuite>
+</testsuites>
+"""
+
 
 def _import(
     client: flask.testing.FlaskClient,
@@ -58,6 +67,25 @@ class TestImport:
         passed_resp = client.get("/results/cardano-node-tests/passed", headers=auth_headers)
         assert passed_resp.status_code == http.HTTPStatus.OK
         assert passed_resp.data == b"tests.test_foo::test_bar"
+
+    def test_rerun_with_different_content_is_not_rejected(
+        self, client: flask.testing.FlaskClient, auth_headers: dict
+    ) -> None:
+        """Same testrun+job, re-uploaded with different content, must both land.
+
+        The opposite of /history's behavior on purpose - see the "enable
+        multiple uploads... because the same job can be re-run" comment in
+        import_results. Guards against this accidentally regressing to
+        /history's reject-a-duplicate pattern.
+        """
+        first = _import(client, auth_headers, "rt", "1", content=SAMPLE_XML)
+        assert first.status_code == http.HTTPStatus.OK
+
+        second = _import(client, auth_headers, "rt", "1", content=RERUN_XML)
+        assert second.status_code == http.HTTPStatus.OK
+
+        passed_resp = client.get("/results/rt/passed", headers=auth_headers)
+        assert passed_resp.data == b"tests.test_foo::test_bar\ntests.test_foo::test_other"
 
     def test_rejects_traversal_testrun_name_on_import(
         self, client: flask.testing.FlaskClient, auth_headers: dict
