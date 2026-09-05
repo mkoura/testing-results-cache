@@ -34,6 +34,12 @@ MAX_PATH_SEGMENT_LENGTH = 200
 # Dots are allowed so real-world version strings like "11.1.0" work, but a
 # segment of dots only ("..", ".") is rejected in `_valid_path_segment`.
 _SAFE_SEGMENT_RE = re.compile(r"[A-Za-z0-9_.-]+")
+# A real sync-results bundle (JSON metrics plus a handful of PNGs) is a few
+# MB uncompressed at most. This is a generous ceiling on top of that, not a
+# tight one - it exists only to bound the cost of `_valid_zip` decompressing
+# a crafted archive that stays under MAX_CONTENT_LENGTH on disk but expands
+# to gigabytes (a "zip bomb").
+MAX_UNCOMPRESSED_BYTES = 200 * 1000 * 1000
 
 sync_results = flask.Blueprint("sync_results", __name__)
 
@@ -55,11 +61,31 @@ def _valid_zip(path: Path) -> bool:
     is no reject-as-duplicate fallback here (see the module docstring), so
     a corrupt-but-EOCD-shaped upload would otherwise silently overwrite a
     good stored zip.
+
+    The declared uncompressed size is checked before testzip() decompresses
+    anything, so a zip bomb (tiny on disk, huge once inflated) is rejected
+    without paying for the inflate. testzip() also raises RuntimeError for
+    an encrypted member and NotImplementedError for an unsupported
+    compression method - neither is a corruption, but both mean this
+    service cannot read the file back either, so they are treated the same
+    as "not a valid zip" here.
     """
     try:
         with zipfile.ZipFile(path) as zf:
-            return bool(zf.namelist()) and zf.testzip() is None
-    except (zipfile.BadZipFile, zlib.error, EOFError, OSError):
+            infos = zf.infolist()
+            if not infos:
+                return False
+            if sum(info.file_size for info in infos) > MAX_UNCOMPRESSED_BYTES:
+                return False
+            return zf.testzip() is None
+    except (
+        zipfile.BadZipFile,
+        zlib.error,
+        EOFError,
+        OSError,
+        RuntimeError,
+        NotImplementedError,
+    ):
         return False
 
 
