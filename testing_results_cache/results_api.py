@@ -1,6 +1,7 @@
 import hashlib
 import random
 import re
+import sqlite3
 import string
 from pathlib import Path
 from typing import List
@@ -159,6 +160,21 @@ def import_results(testrun_name: str, job_id: str) -> dict:
         filepath.unlink()
         response = flask.jsonify(message="Failed to import testrun")
         response.status_code = 400
+        flask.abort(response)
+    except sqlite3.OperationalError as exc:
+        # A concurrent writer elsewhere in the service can hold the write
+        # lock long enough to time out here. Transient, so tell the caller
+        # to retry rather than reporting a hard failure. The file was
+        # already renamed into place above, so it's removed here too -
+        # otherwise a retry with the same content would find `filepath`
+        # already occupied and get a false "already uploaded".
+        filepath.unlink()
+        if "database is locked" not in str(exc):
+            raise
+        flask.current_app.logger.warning(f"Results import for '{testrun_name}' hit database lock")
+        response = flask.jsonify(message="Server busy, try again")
+        response.status_code = 503
+        response.headers["Retry-After"] = "5"
         flask.abort(response)
 
     return {
