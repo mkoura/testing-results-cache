@@ -1,10 +1,10 @@
 import sqlite3
-from typing import Optional
 
 import click
 import flask
 from werkzeug import security
 
+from testing_results_cache import migrations_runner
 from testing_results_cache import users
 
 
@@ -27,7 +27,7 @@ def init_db() -> None:
         db.executescript(f.read().decode())
 
 
-def close_db(_exc: Optional[BaseException] = None) -> None:
+def close_db(_exc: BaseException | None = None) -> None:
     db = flask.g.pop("db", None)
 
     if db is not None:
@@ -55,3 +55,31 @@ def init_db_command() -> None:
     """Clear the existing data and create new tables."""
     init_db()
     click.echo("Initialized the database.")
+
+
+@click.command("migrate")
+@click.option("--dry-run", is_flag=True, help="Show what would be applied, change nothing.")
+def migrate_command(dry_run: bool) -> None:
+    """Apply any migrations the database has not seen yet."""
+    conn = get_db()
+    try:
+        todo = migrations_runner.pending(conn=conn)
+    except migrations_runner.MigrationError as err:
+        raise click.ClickException(str(err)) from err
+
+    if not todo:
+        click.echo(f"Up to date at version {migrations_runner.current_version(conn)}.")
+        return
+
+    if dry_run:
+        for migration in todo:
+            click.echo(f"Would apply {migration.path.name}")
+        return
+
+    try:
+        applied = migrations_runner.apply(conn=conn)
+    except migrations_runner.MigrationError as err:
+        raise click.ClickException(str(err)) from err
+
+    for migration in applied:
+        click.echo(f"Applied {migration.path.name}")

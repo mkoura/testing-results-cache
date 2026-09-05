@@ -45,27 +45,18 @@ Initialize database
 flask --app testing_results_cache.app:create_app init-db
 ```
 
-**Note for existing deployments:** `init-db` drops and recreates all tables.
-To add the `history` and `sync_results` tables without losing data, run the
-following instead:
+`init-db` creates the schema from scratch and drops any existing tables, so
+run it only on a new deployment.
+
+Bring an existing database up to the current schema instead with
 
 ```sh
-sqlite3 instance/testing_results_cache.db <<'EOF'
-CREATE TABLE IF NOT EXISTS history (
-    id INTEGER PRIMARY KEY,
-    testrun_name TEXT NOT NULL,
-    job_id TEXT NOT NULL,
-    user_id INTEGER,
-    timestamp TEXT NOT NULL,
-    UNIQUE (testrun_name, job_id)
-);
-CREATE TABLE IF NOT EXISTS sync_results (
-    version TEXT PRIMARY KEY,
-    user_id INTEGER,
-    timestamp TEXT NOT NULL
-);
-EOF
+flask --app testing_results_cache.app:create_app migrate
 ```
+
+`migrate` applies only the migrations the database has not seen yet, in one
+transaction each, and records each one it applies. Running it twice does
+nothing the second time. Add `--dry-run` to list what it would apply.
 
 Add user(s)
 
