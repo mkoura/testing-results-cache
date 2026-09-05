@@ -28,6 +28,7 @@ import pytest
 # runtime-version mismatch, not something introduced here.
 from werkzeug.test import TestResponse  # type: ignore[attr-defined]
 
+from testing_results_cache import flask_db
 from testing_results_cache import sync_results_api
 from testing_results_cache import sync_results_cache
 
@@ -204,6 +205,31 @@ class TestUploadAndDownload:
 
         resp = client.get("/sync-results/11.1.0/zip", headers=auth_headers)
         assert resp.status_code == http.HTTPStatus.NOT_FOUND
+
+    def test_missing_table_is_json_500_not_html(
+        self, app: flask.Flask, client: flask.testing.FlaskClient, auth_headers: dict
+    ) -> None:
+        """An unrun migration must not break the JSON-error contract.
+
+        Every other error response on this blueprint is JSON - the upload
+        route already handles a DB error this way, but the two GET routes
+        had no such handling at all, so a missing table escaped uncaught
+        into Werkzeug's default HTML error page with nothing logged.
+        """
+        with app.app_context():
+            conn = flask_db.get_db()
+            conn.execute("DROP TABLE sync_results")
+            conn.commit()
+
+        list_resp = client.get("/sync-results", headers=auth_headers)
+        assert list_resp.status_code == http.HTTPStatus.INTERNAL_SERVER_ERROR
+        assert list_resp.content_type == "application/json"
+        assert list_resp.get_json()["message"] == "Failed to read sync results"
+
+        zip_resp = client.get("/sync-results/11.1.0/zip", headers=auth_headers)
+        assert zip_resp.status_code == http.HTTPStatus.INTERNAL_SERVER_ERROR
+        assert zip_resp.content_type == "application/json"
+        assert zip_resp.get_json()["message"] == "Failed to read sync results"
 
     def test_rejects_missing_file_part(
         self, client: flask.testing.FlaskClient, auth_headers: dict
