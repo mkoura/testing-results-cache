@@ -33,8 +33,7 @@ CREATE TABLE IF NOT EXISTS history (
 );
 
 CREATE TABLE IF NOT EXISTS sync_results (
-    id INTEGER PRIMARY KEY,
-    version TEXT NOT NULL UNIQUE,
+    version TEXT PRIMARY KEY,
     user_id INTEGER,
     timestamp TEXT NOT NULL
 );

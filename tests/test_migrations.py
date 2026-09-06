@@ -16,6 +16,7 @@ from testing_results_cache import migrations_runner
 
 # The two migrations this repo ships.
 SHIPPED_MIGRATIONS = 2
+SEVENTH = 7
 
 
 @pytest.fixture
@@ -94,6 +95,22 @@ class TestRefusesToGuess:
         """An older release pointed at a newer database must do nothing."""
         migrations_runner.apply(conn=conn, migrations_dir=migrations)
         conn.execute("INSERT INTO schema_version(version, name) VALUES (99, 'from-the-future')")
+        conn.commit()
+
+        with pytest.raises(migrations_runner.MigrationError, match="newer release"):
+            migrations_runner.pending(conn=conn, migrations_dir=migrations)
+
+    def test_refuses_a_database_exactly_one_version_ahead(
+        self, conn: sqlite3.Connection, migrations: Path
+    ) -> None:
+        """The realistic distance is one, not ninety-seven.
+
+        One release rolled back leaves the database a single migration ahead.
+        A guard tested only at a large gap proves the guard exists, not where
+        it sits.
+        """
+        migrations_runner.apply(conn=conn, migrations_dir=migrations)
+        conn.execute("INSERT INTO schema_version(version, name) VALUES (3, 'next_release')")
         conn.commit()
 
         with pytest.raises(migrations_runner.MigrationError, match="newer release"):
@@ -178,7 +195,7 @@ class TestTheRealMigrations:
         migrated = sqlite3.connect(tmp_path / "migrated.db")
         migrations_runner.apply(conn=migrated)
 
-        def shape(conn: sqlite3.Connection) -> set:
+        def objects(conn: sqlite3.Connection) -> set:
             return {
                 (r[0], r[1])
                 for r in conn.execute(
@@ -187,4 +204,104 @@ class TestTheRealMigrations:
                 )
             }
 
-        assert shape(fresh) == shape(migrated)
+        def columns(conn: sqlite3.Connection, table: str) -> list:
+            # name, type, notnull, primary key. Comparing only object names
+            # lets a column difference through, and the two lineages did
+            # differ on `sync_results` while this test was passing.
+            return [
+                (r[1], r[2].upper(), r[3], r[5])
+                for r in conn.execute(f"PRAGMA table_info({table})")
+            ]
+
+        assert objects(fresh) == objects(migrated)
+        for kind, name in sorted(objects(fresh)):
+            if kind == "table":
+                assert columns(fresh, name) == columns(migrated, name), (
+                    f"{name} differs between a fresh install and a migrated one"
+                )
+
+
+class TestOrdering:
+    def test_migrations_run_in_numeric_order_not_filename_order(self, tmp_path: Path) -> None:
+        """Sorting filenames as strings puts 10 before 3.
+
+        The filename pattern accepts an unpadded number, so the first person to
+        write `3_x.sql` next to `010_y.sql` gets them applied backwards.
+        """
+        folder = tmp_path / "migrations"
+        folder.mkdir()
+        (folder / "3_third.sql").write_text("CREATE TABLE IF NOT EXISTS c (id INTEGER);")
+        (folder / "010_tenth.sql").write_text("CREATE TABLE IF NOT EXISTS j (id INTEGER);")
+
+        found = migrations_runner.available(folder)
+
+        assert [m.version for m in found] == [3, 10]
+
+    def test_a_migration_that_failed_is_retried_later(self, tmp_path: Path) -> None:
+        """Pending is membership, not "above the highest applied".
+
+        If a lower-numbered migration fails while a higher one has already
+        succeeded, comparing against the maximum skips the failed one for good
+        and every later run reports success.
+        """
+        folder = tmp_path / "migrations"
+        folder.mkdir()
+        (folder / "001_broken.sql").write_text("CREATE TABLE a (id INTEGER); SELECT nope;")
+        (folder / "002_fine.sql").write_text("CREATE TABLE IF NOT EXISTS b (id INTEGER);")
+        conn = sqlite3.connect(tmp_path / "t.db")
+
+        # Apply 002 on its own first, so the maximum is ahead of the broken one.
+        conn.executescript(
+            "CREATE TABLE schema_version (version INTEGER PRIMARY KEY, name TEXT NOT NULL,"
+            " applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);"
+            "INSERT INTO schema_version(version, name) VALUES (2, 'fine');"
+        )
+
+        still_todo = migrations_runner.pending(conn=conn, migrations_dir=folder)
+
+        assert [m.version for m in still_todo] == [1]
+
+    def test_current_version_is_the_highest_not_the_count(self, conn: sqlite3.Connection) -> None:
+        """They agree only while the applied versions are contiguous."""
+        conn.executescript(
+            "CREATE TABLE schema_version (version INTEGER PRIMARY KEY, name TEXT NOT NULL,"
+            " applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);"
+            "INSERT INTO schema_version(version, name) VALUES (7, 'seventh');"
+        )
+        assert migrations_runner.current_version(conn) == SEVENTH
+
+
+class TestDryRunIsADryRun:
+    def test_reading_the_version_does_not_create_the_table(self, conn: sqlite3.Connection) -> None:
+        """`migrate --dry-run` goes through here.
+
+        A dry run that writes to the database it is only describing breaks the
+        promise of the flag an operator reaches for when nervous.
+        """
+        migrations_runner.current_version(conn)
+        migrations_runner.pending(conn=conn)
+
+        assert "schema_version" not in _tables(conn)
+
+
+class TestMisconfiguredDeployment:
+    def test_a_missing_migrations_directory_is_an_error(self, tmp_path: Path) -> None:
+        """Not a silent success.
+
+        `glob` on a missing directory returns nothing rather than raising, so
+        without a check the command run to confirm a deployment reports
+        "Up to date at version 0" on a database that has had nothing applied.
+        """
+        with pytest.raises(migrations_runner.MigrationError, match="No migrations directory"):
+            migrations_runner.available(tmp_path / "not-here")
+
+    def test_an_unreadable_migration_is_a_migration_error(
+        self, conn: sqlite3.Connection, migrations: Path
+    ) -> None:
+        """Not an OSError traceback: the CLI catches MigrationError."""
+        (migrations / "001_first.sql").chmod(0o000)
+        try:
+            with pytest.raises(migrations_runner.MigrationError, match="001_first.sql"):
+                migrations_runner.apply(conn=conn, migrations_dir=migrations)
+        finally:
+            (migrations / "001_first.sql").chmod(0o644)

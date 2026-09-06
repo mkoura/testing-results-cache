@@ -28,6 +28,14 @@ def init_db() -> None:
     with flask.current_app.open_resource("schema.sql") as f:
         db.executescript(f.read().decode())
 
+    # schema.sql already creates everything the migrations would, so record
+    # them as applied. Without this a brand-new database reports version 0 and
+    # `migrate` offers to re-apply the baseline. That is harmless only while
+    # every migration is written IF NOT EXISTS; the first ALTER TABLE would
+    # fail on every fresh install.
+    migrations_runner.stamp_as_current(db)
+    db.commit()
+
 
 def close_db(_exc: BaseException | None = None) -> None:
     db = flask.g.pop("db", None)
@@ -66,7 +74,7 @@ def migrate_command(dry_run: bool) -> None:
     conn = get_db()
     try:
         todo = migrations_runner.pending(conn=conn)
-    except migrations_runner.MigrationError as err:
+    except (migrations_runner.MigrationError, sqlite3.Error) as err:
         raise click.ClickException(str(err)) from err
 
     if not todo:
@@ -80,7 +88,7 @@ def migrate_command(dry_run: bool) -> None:
 
     try:
         applied = migrations_runner.apply(conn=conn)
-    except migrations_runner.MigrationError as err:
+    except (migrations_runner.MigrationError, sqlite3.Error) as err:
         raise click.ClickException(str(err)) from err
 
     for migration in applied:
@@ -96,10 +104,10 @@ def prune_history_command(days: int, dry_run: bool) -> None:
     conn = get_db()
 
     try:
-        removed = retention.prune(
+        removed, stranded = retention.prune(
             conn=conn, history_folder=history_folder, days=days, dry_run=dry_run
         )
-    except ValueError as err:
+    except (ValueError, sqlite3.Error) as err:
         raise click.ClickException(str(err)) from err
 
     verb = "Would remove" if dry_run else "Removed"
@@ -112,3 +120,13 @@ def prune_history_command(days: int, dry_run: bool) -> None:
         click.echo(f"{len(orphans)} stored files have no matching row:")
         for path in orphans:
             click.echo(f"  {path}")
+
+    if stranded:
+        # A non-zero exit, so a cron job that could not delete a single file
+        # does not report success. The rows are already gone, so rerunning
+        # will not retry these: the files have to be removed by hand.
+        msg = (
+            f"{len(stranded)} files could not be removed and are now orphans. "
+            "Their rows are gone, so a later run will not retry them."
+        )
+        raise click.ClickException(msg)
