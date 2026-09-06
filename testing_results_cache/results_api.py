@@ -6,14 +6,12 @@ from typing import List
 from typing import Set
 
 import flask
-from werkzeug import security
 
 from testing_results_cache import common
 from testing_results_cache import flask_auth
 from testing_results_cache import flask_db
 from testing_results_cache import junittools
 from testing_results_cache import results_cache
-from testing_results_cache import users
 
 # a pytest nodeid path segment is at most "file.py::ClassName"
 MAX_FILE_CLASS_PARTS = 2
@@ -55,19 +53,6 @@ def get_nonpassed(tests_verdicts: List[common.TestVerdict]) -> Set[str]:
     }
     all_tests = {r.testid for r in tests_verdicts}
     return all_tests - passed
-
-
-@flask_auth.auth.verify_password
-def verify_password(username: str, password: str) -> dict | None:
-    conn = flask_db.get_db()
-    user_id, db_password = users.get_user(conn=conn, user_name=username)
-    if user_id == -1:
-        return None
-
-    if security.check_password_hash(db_password, password):
-        return {"user_id": user_id, "username": username}
-
-    return None
 
 
 def import_testrun(junit_file: Path, testrun_name: str, user_id: int) -> int:
