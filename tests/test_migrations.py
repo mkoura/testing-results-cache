@@ -301,7 +301,7 @@ class TestMisconfiguredDeployment:
         """Not an OSError traceback: the CLI catches MigrationError."""
         (migrations / "001_first.sql").chmod(0o000)
         try:
-            with pytest.raises(migrations_runner.MigrationError, match="001_first.sql"):
+            with pytest.raises(migrations_runner.MigrationError, match=re.escape("001_first.sql")):
                 migrations_runner.apply(conn=conn, migrations_dir=migrations)
         finally:
             (migrations / "001_first.sql").chmod(0o644)
