@@ -9,8 +9,8 @@ re-run.
 import base64
 import http
 import io
+from datetime import UTC
 from datetime import datetime
-from datetime import timezone
 from pathlib import Path
 from typing import List
 
@@ -306,7 +306,7 @@ class TestPathValidation:
                 testrun_name="legacy name 1.0",
                 user_id=1,
                 testsuite_data=common.TestsuiteData(
-                    timestamp=datetime(2026, 1, 1, tzinfo=timezone.utc),
+                    timestamp=datetime(2026, 1, 1, tzinfo=UTC),
                     tests_verdicts=[
                         common.TestVerdict(testid="pkg.test_m.C::test_a", verdict="passed")
                     ],

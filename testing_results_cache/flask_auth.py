@@ -1,5 +1,3 @@
-from typing import Optional
-
 import flask_httpauth
 from werkzeug import security
 
@@ -10,7 +8,7 @@ auth = flask_httpauth.HTTPBasicAuth()
 
 
 @auth.verify_password
-def verify_password(username: str, password: str) -> Optional[dict]:
+def verify_password(username: str, password: str) -> dict | None:
     conn = flask_db.get_db()
     user_id, db_password = users.get_user(conn=conn, user_name=username)
     if user_id == -1:

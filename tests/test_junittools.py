@@ -8,8 +8,8 @@ the escape-character sanitizing, and treating xfail as passed.
 
 import http
 import io
+from datetime import UTC
 from datetime import datetime
-from datetime import timezone
 from pathlib import Path
 
 import flask
@@ -87,14 +87,14 @@ class TestTimestamp:
     def test_parses_a_plain_timestamp(self, tmp_path: Path) -> None:
         junit_file = _write(tmp_path, _suite(_case("test_a")))
         data = junittools.get_testsuite_data(junit_file=junit_file)
-        assert data.timestamp == datetime(2026, 8, 5, 1, 0, 0, tzinfo=timezone.utc)
+        assert data.timestamp == datetime(2026, 8, 5, 1, 0, 0, tzinfo=UTC)
 
     def test_strips_a_utc_offset(self, tmp_path: Path) -> None:
         junit_file = _write(
             tmp_path, _suite(_case("test_a"), timestamp="2026-08-05T01:00:00.000000+00:00")
         )
         data = junittools.get_testsuite_data(junit_file=junit_file)
-        assert data.timestamp == datetime(2026, 8, 5, 1, 0, 0, tzinfo=timezone.utc)
+        assert data.timestamp == datetime(2026, 8, 5, 1, 0, 0, tzinfo=UTC)
 
     def test_a_non_utc_offset_is_not_handled(self, tmp_path: Path) -> None:
         """Known limitation, pinned so a change is deliberate.
@@ -112,7 +112,7 @@ class TestTimestamp:
         content = _suite(_case("test_a")).replace(b' timestamp="2026-08-05T01:00:00.000000"', b"")
         junit_file = _write(tmp_path, content)
         data = junittools.get_testsuite_data(junit_file=junit_file)
-        assert data.timestamp == datetime(1970, 1, 1, tzinfo=timezone.utc)
+        assert data.timestamp == datetime(1970, 1, 1, tzinfo=UTC)
 
 
 class TestRejects:

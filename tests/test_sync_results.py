@@ -12,9 +12,9 @@ import sqlite3
 import subprocess
 import threading
 import zipfile
+from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
-from datetime import timezone
 from pathlib import Path
 from typing import List
 
@@ -135,7 +135,7 @@ class TestUploadAndDownload:
         # comment in schema.sql for the converter bug this guards against.
         timestamp = datetime.fromisoformat(entries[0]["timestamp"])
         assert timestamp.utcoffset() == timedelta(0)
-        assert abs(datetime.now(timezone.utc) - timestamp) < timedelta(minutes=1)
+        assert abs(datetime.now(UTC) - timestamp) < timedelta(minutes=1)
 
         with client.get("/sync-results/11.1.0/zip", headers=auth_headers) as zip_resp:
             assert zip_resp.status_code == http.HTTPStatus.OK
@@ -461,9 +461,7 @@ class TestListOrdering:
     ) -> None:
         _upload(client, auth_headers, "11.0.1")
         _upload(client, auth_headers, "11.1.0")
-        _set_timestamp(
-            app.config["DATABASE"], "11.0.1", datetime.now(timezone.utc) - timedelta(days=2)
-        )
+        _set_timestamp(app.config["DATABASE"], "11.0.1", datetime.now(UTC) - timedelta(days=2))
 
         resp = client.get("/sync-results", headers=auth_headers)
         versions = [entry["version"] for entry in resp.get_json()]
@@ -474,9 +472,7 @@ class TestListOrdering:
     ) -> None:
         _upload(client, auth_headers, "11.0.1")
         _upload(client, auth_headers, "11.1.0")
-        _set_timestamp(
-            app.config["DATABASE"], "11.0.1", datetime.now(timezone.utc) - timedelta(days=2)
-        )
+        _set_timestamp(app.config["DATABASE"], "11.0.1", datetime.now(UTC) - timedelta(days=2))
 
         # Re-upload the older version - it should now sort as the newest.
         _upload(client, auth_headers, "11.0.1", content=OTHER_ZIP)
@@ -504,6 +500,10 @@ class TestListOrdering:
         assert resp.status_code == http.HTTPStatus.OK
         versions = [entry["version"] for entry in resp.get_json()]
         assert versions == ["11.1.0"]
+
+
+# SQLITE_BUSY (5) with extended bits: SQLITE_BUSY_SNAPSHOT.
+SQLITE_BUSY_SNAPSHOT = 517
 
 
 class TestLockContention:
@@ -558,6 +558,110 @@ class TestLockContention:
         assert resp.status_code == http.HTTPStatus.SERVICE_UNAVAILABLE
         assert resp.headers.get("Retry-After") == "5"
 
+        with client.get("/sync-results/11.1.0/zip", headers=auth_headers) as zip_resp:
+            assert zip_resp.data == SAMPLE_ZIP
+
+    @pytest.mark.parametrize(
+        ("errorcode", "message", "expected"),
+        [
+            # The whole point of the change: the code decides, not the words.
+            (
+                sqlite3.SQLITE_BUSY,
+                "some other wording entirely",
+                http.HTTPStatus.SERVICE_UNAVAILABLE,
+            ),
+            # Extended code. Under WAL a plain busy arrives as
+            # SQLITE_BUSY_SNAPSHOT, and an equality test would drop it.
+            (SQLITE_BUSY_SNAPSHOT, "database is locked", http.HTTPStatus.SERVICE_UNAVAILABLE),
+            # Not a busy at all. Retrying this never clears it.
+            (
+                sqlite3.SQLITE_LOCKED,
+                "database table is locked",
+                http.HTTPStatus.INTERNAL_SERVER_ERROR,
+            ),
+        ],
+        ids=["busy_with_other_wording", "wal_extended_busy", "locked_is_not_busy"],
+    )
+    def test_only_a_busy_code_is_retryable(
+        self,
+        client: flask.testing.FlaskClient,
+        auth_headers: dict,
+        monkeypatch: pytest.MonkeyPatch,
+        errorcode: int,
+        message: str,
+        expected: http.HTTPStatus,
+    ) -> None:
+        """Pins the branch to the error code rather than the message text.
+
+        The message is not API and changes between SQLite builds, which is why
+        the check moved off it. Without a case whose code and wording disagree,
+        the old substring test passes every one of these tests too.
+        """
+        first = _upload(client, auth_headers, "11.1.0")
+        assert first.status_code == http.HTTPStatus.OK
+
+        class CodedError(sqlite3.OperationalError):
+            sqlite_errorcode = errorcode
+
+        class _FailingCommit:
+            def __init__(self, conn: sqlite3.Connection) -> None:
+                self._conn = conn
+
+            def __getattr__(self, name: str) -> object:
+                return getattr(self._conn, name)
+
+            def commit(self) -> None:
+                raise CodedError(message)
+
+        real_get_db = flask_db.get_db
+        monkeypatch.setattr(flask_db, "get_db", lambda: _FailingCommit(real_get_db()))
+        resp = _upload(client, auth_headers, "11.1.0", content=OTHER_ZIP)
+        monkeypatch.undo()
+
+        assert resp.status_code == expected
+
+        # Whatever the verdict, the good zip it was replacing is still served.
+        with client.get("/sync-results/11.1.0/zip", headers=auth_headers) as zip_resp:
+            assert zip_resp.data == SAMPLE_ZIP
+
+    def test_a_non_lock_database_error_is_still_a_500(
+        self,
+        client: flask.testing.FlaskClient,
+        auth_headers: dict,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Only lock contention is retryable. Everything else is a real failure.
+
+        Telling a caller to retry a broken schema or a full disk sends it round
+        the same wall forever. This is the branch the lock check has to get
+        right, so it is tested with an error that carries no sqlite error code
+        at all, which is what a hand-constructed OperationalError looks like.
+        """
+        first = _upload(client, auth_headers, "11.1.0")
+        assert first.status_code == http.HTTPStatus.OK
+
+        class _FailingCommit:
+            """Delegates everything to the real connection except the commit."""
+
+            def __init__(self, conn: sqlite3.Connection) -> None:
+                self._conn = conn
+
+            def __getattr__(self, name: str) -> object:
+                return getattr(self._conn, name)
+
+            def commit(self) -> None:
+                msg = "disk I/O error"
+                raise sqlite3.OperationalError(msg)
+
+        real_get_db = flask_db.get_db
+        monkeypatch.setattr(flask_db, "get_db", lambda: _FailingCommit(real_get_db()))
+        resp = _upload(client, auth_headers, "11.1.0", content=OTHER_ZIP)
+        monkeypatch.undo()
+
+        assert resp.status_code == http.HTTPStatus.INTERNAL_SERVER_ERROR
+        assert "Retry-After" not in resp.headers
+
+        # And the good zip it was replacing is still the one served.
         with client.get("/sync-results/11.1.0/zip", headers=auth_headers) as zip_resp:
             assert zip_resp.data == SAMPLE_ZIP
 

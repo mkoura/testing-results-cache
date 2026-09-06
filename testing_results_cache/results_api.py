@@ -3,7 +3,6 @@ import random
 import string
 from pathlib import Path
 from typing import List
-from typing import Optional
 from typing import Set
 
 import flask
@@ -59,7 +58,7 @@ def get_nonpassed(tests_verdicts: List[common.TestVerdict]) -> Set[str]:
 
 
 @flask_auth.auth.verify_password
-def verify_password(username: str, password: str) -> Optional[dict]:
+def verify_password(username: str, password: str) -> dict | None:
     conn = flask_db.get_db()
     user_id, db_password = users.get_user(conn=conn, user_name=username)
     if user_id == -1:

@@ -3,7 +3,6 @@ from datetime import datetime
 from typing import List
 from typing import NamedTuple
 from typing import NoReturn
-from typing import Optional
 
 import flask
 
@@ -19,7 +18,7 @@ MAX_PATH_SEGMENT_LENGTH = 200
 _SAFE_SEGMENT_RE = re.compile(r"[A-Za-z0-9_.-]+")
 
 
-def abort_json(status_code: int, message: str, headers: Optional[dict] = None) -> NoReturn:
+def abort_json(status_code: int, message: str, headers: dict | None = None) -> NoReturn:
     """Abort the request with a JSON error body."""
     response = flask.jsonify(message=message)
     response.status_code = status_code
