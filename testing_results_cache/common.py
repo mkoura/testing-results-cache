@@ -50,8 +50,12 @@ def reject_invalid_segments(*values: str) -> None:
             # Logged as well as refused: the access log cannot tell this
             # route's several 400s apart, and a traversal attempt should leave
             # a trace an operator can find.
+            # Both values are repr'd. The path is caller-controlled too, and a
+            # percent-encoded newline in it reaches here decoded, so writing it
+            # raw lets an authenticated caller add whatever lines they like to
+            # the log around this warning.
             flask.current_app.logger.warning(
-                f"Rejected invalid path segment {value!r} on {flask.request.path}"
+                f"Rejected invalid path segment {value!r} on {flask.request.path!r}"
             )
             abort_json(
                 400,

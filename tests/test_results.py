@@ -453,6 +453,26 @@ class TestRejectionIsLogged:
             _import(client, auth_headers, testrun_name="%2e%2e")
         assert any("Rejected invalid path segment" in r.message for r in caplog.records)
 
+    def test_the_rejection_cannot_forge_extra_log_lines(
+        self,
+        client: flask.testing.FlaskClient,
+        auth_headers: dict,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A newline in the URL must not become a newline in the log.
+
+        The path is caller-controlled and reaches the handler with `%0a`
+        already decoded. Written raw, one warning becomes two lines, and the
+        second is whatever the caller chose, timestamp and all.
+        """
+        forged = "evil%0a2026-01-01 00:00:00 WARNING: nothing to see here"
+        with caplog.at_level("WARNING"):
+            _import(client, auth_headers, testrun_name=forged)
+
+        rejections = [r for r in caplog.records if "Rejected invalid path segment" in r.message]
+        assert len(rejections) == 1
+        assert "\n" not in rejections[0].getMessage()
+
 
 class TestVerdictHelpers:
     def test_passed_includes_xfailed(self) -> None:
