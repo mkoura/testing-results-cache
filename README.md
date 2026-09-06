@@ -39,6 +39,17 @@ This creates a `.venv` virtual environment. Activate it with
 
 ## Setup
 
+The `flask` commands below do not read `start_service.sh`, so they do not
+inherit its `INSTANCE_PATH`. Point them at the same directory the service uses,
+or they act on a different database and still report success:
+
+```sh
+export INSTANCE_PATH="$HOME/instance"
+```
+
+Without it, a checkout that still has its `.git` directory falls back to
+`instance_dev` next to the code, which is not the deployed database.
+
 Initialize database
 
 ```sh
@@ -56,7 +67,11 @@ flask --app testing_results_cache.app:create_app migrate
 
 `migrate` applies only the migrations the database has not seen yet, in one
 transaction each, and records each one it applies. Running it twice does
-nothing the second time. Add `--dry-run` to list what it would apply.
+nothing the second time. Add `--dry-run` to list what it would apply and change
+nothing.
+
+Check `INSTANCE_PATH` is set first. `migrate` reports success on whatever
+database it is pointed at, including an empty one it just created.
 
 Add user(s)
 
@@ -176,7 +191,12 @@ flask --app testing_results_cache.app:create_app prune-history --days 90
 
 Use `--dry-run` first to list what would go. The command also reports any
 stored file that no `history` row mentions, which is what a crash between the
-delete and the unlink leaves behind. Those files are safe to delete.
+delete and the unlink leaves behind. Those files are safe to delete; uploads
+still in flight are not listed.
+
+If a file cannot be deleted, the command says so and exits non-zero. Its row is
+already gone by then, so a later run will not retry it: remove those files by
+hand.
 
 Nothing runs this for you. Put it in a cron job or a systemd timer if the
 history folder needs to stay bounded.
