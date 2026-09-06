@@ -13,9 +13,11 @@ import sqlite3
 import time
 from pathlib import Path
 
+import click
 import flask
 import pytest
 from click.testing import CliRunner
+from click.testing import Result
 
 from testing_results_cache import flask_db
 from testing_results_cache import history_cache
@@ -27,7 +29,7 @@ DAYS_KEPT = 30
 SHIPPED_MIGRATIONS = 2
 
 
-def _run(app: flask.Flask, command: object, *args: str) -> object:
+def _run(app: flask.Flask, command: click.Command, *args: str) -> Result:
     """Invoke a click command inside the app context it expects."""
     with app.app_context():
         return CliRunner().invoke(command, list(args), obj=app)
