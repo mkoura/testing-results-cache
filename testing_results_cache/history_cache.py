@@ -7,9 +7,9 @@ job_id lookup doesn't need to stat every file on disk.
 """
 
 import sqlite3
+from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
-from datetime import timezone
 from typing import List
 
 from testing_results_cache import common
@@ -26,7 +26,7 @@ def _format_timestamp(value: datetime) -> str:
 
 
 def _parse_timestamp(value: str) -> datetime:
-    return datetime.strptime(value, TIMESTAMP_FORMAT).replace(tzinfo=timezone.utc)
+    return datetime.strptime(value, TIMESTAMP_FORMAT).replace(tzinfo=UTC)
 
 
 def save_history_entry(
@@ -46,7 +46,7 @@ def save_history_entry(
     cur.execute(
         "INSERT INTO history(testrun_name, job_id, user_id, timestamp) VALUES (?,?,?,?) "
         "ON CONFLICT(testrun_name, job_id) DO NOTHING",
-        (testrun_name, job_id, user_id, _format_timestamp(datetime.now(timezone.utc))),
+        (testrun_name, job_id, user_id, _format_timestamp(datetime.now(UTC))),
     )
     return cur.rowcount == 1
 
@@ -69,7 +69,7 @@ def get_history_entries(
     conn: sqlite3.Connection, testrun_name: str, days: int
 ) -> List[common.HistoryEntry]:
     """Get history entries for a testrun within the last `days` days, newest first."""
-    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    cutoff = datetime.now(UTC) - timedelta(days=days)
     cur = conn.cursor()
     cur.execute(
         "SELECT job_id, timestamp FROM history WHERE testrun_name = ? AND timestamp >= ? "

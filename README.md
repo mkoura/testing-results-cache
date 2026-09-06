@@ -39,33 +39,39 @@ This creates a `.venv` virtual environment. Activate it with
 
 ## Setup
 
+The `flask` commands below do not read `start_service.sh`, so they do not
+inherit its `INSTANCE_PATH`. Point them at the same directory the service uses,
+or they act on a different database and still report success:
+
+```sh
+export INSTANCE_PATH="$HOME/instance"
+```
+
+Without it, a checkout that still has its `.git` directory falls back to
+`instance_dev` next to the code, which is not the deployed database.
+
 Initialize database
 
 ```sh
 flask --app testing_results_cache.app:create_app init-db
 ```
 
-**Note for existing deployments:** `init-db` drops and recreates all tables.
-To add the `history` and `sync_results` tables without losing data, run the
-following instead:
+`init-db` creates the schema from scratch and drops any existing tables, so
+run it only on a new deployment.
+
+Bring an existing database up to the current schema instead with
 
 ```sh
-sqlite3 instance/testing_results_cache.db <<'EOF'
-CREATE TABLE IF NOT EXISTS history (
-    id INTEGER PRIMARY KEY,
-    testrun_name TEXT NOT NULL,
-    job_id TEXT NOT NULL,
-    user_id INTEGER,
-    timestamp TEXT NOT NULL,
-    UNIQUE (testrun_name, job_id)
-);
-CREATE TABLE IF NOT EXISTS sync_results (
-    version TEXT PRIMARY KEY,
-    user_id INTEGER,
-    timestamp TEXT NOT NULL
-);
-EOF
+flask --app testing_results_cache.app:create_app migrate
 ```
+
+`migrate` applies only the migrations the database has not seen yet, in one
+transaction each, and records each one it applies. Running it twice does
+nothing the second time. Add `--dry-run` to list what it would apply and change
+nothing.
+
+Check `INSTANCE_PATH` is set first. `migrate` reports success on whatever
+database it is pointed at, including an empty one it just created.
 
 Add user(s)
 
@@ -151,10 +157,10 @@ curl -u username:password http://localhost:5000/results/testrun1/pyrerun
 
 Separate from `/results`: stores raw JUnit XML per testrun+job without parsing
 it, so failure history can be inspected later (e.g. by an AI failure-analysis
-step). One upload per testrun+job. Note that history files are never deleted
-automatically; prune old files and `history` table rows manually if disk space
-becomes a concern. A hard crash mid-upload can also leave stale `.upload-*.tmp`
-files under the history folder; they are safe to delete.
+step). One upload per testrun+job. History is not pruned on a schedule; see
+[Pruning old history](#pruning-old-history) below. A hard crash mid-upload can
+leave stale `.upload-*.tmp` files under the history folder; they are safe to
+delete.
 
 Upload the JUnit XML for a nightly job:
 
@@ -173,6 +179,27 @@ Download the stored JUnit XML for a job:
 ```sh
 curl -u username:password http://localhost:5000/history/testrun1/job1/xml
 ```
+
+## Pruning old history
+
+Remove history entries older than a number of days. This deletes both the
+`history` row and its stored XML.
+
+```sh
+flask --app testing_results_cache.app:create_app prune-history --days 90
+```
+
+Use `--dry-run` first to list what would go. The command also reports any
+stored file that no `history` row mentions, which is what a crash between the
+delete and the unlink leaves behind. Those files are safe to delete; uploads
+still in flight are not listed.
+
+If a file cannot be deleted, the command says so and exits non-zero. Its row is
+already gone by then, so a later run will not retry it: remove those files by
+hand.
+
+Nothing runs this for you. Put it in a cron job or a systemd timer if the
+history folder needs to stay bounded.
 
 ## Sync-test results cache
 

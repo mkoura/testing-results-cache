@@ -282,7 +282,17 @@ def upload_sync_results(version: str) -> dict:
         # OperationalError falls through to the same handling as the
         # generic Exception branch below.
         _rollback(conn, version)
-        if "database is locked" in str(exc):
+        # `sqlite_errorcode`, not the message text: the message is not API and
+        # changes between SQLite builds. SQLITE_BUSY only - SQLITE_LOCKED is a
+        # shared-cache conflict this service cannot produce, and treating it as
+        # transient would tell the caller to retry something that will not clear.
+        # Masked to the low byte: the attribute holds the extended code, so
+        # under WAL a plain busy arrives as SQLITE_BUSY_SNAPSHOT (517) and an
+        # equality test would drop it, turning a retryable 503 into a 500.
+        # getattr: the driver always sets the attribute, but an OperationalError
+        # constructed by hand does not have it, and an AttributeError raised here
+        # would escape as an unlogged 500 instead of the handled one below.
+        if getattr(exc, "sqlite_errorcode", 0) & 0xFF == sqlite3.SQLITE_BUSY:
             flask.current_app.logger.warning(f"Sync-results upload for {version} hit database lock")
             common.abort_json(503, "Server busy, try again", headers={"Retry-After": "5"})
         _abort_storage_failure(version)
