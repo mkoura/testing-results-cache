@@ -18,6 +18,8 @@ from testing_results_cache import users
 
 # a pytest nodeid path segment is at most "file.py::ClassName"
 MAX_FILE_CLASS_PARTS = 2
+# a stored testid is "classname::title", so exactly two parts
+MAX_TESTID_PARTS = 2
 
 results = flask.Blueprint("results", __name__)
 
@@ -84,21 +86,22 @@ def import_testrun(junit_file: Path, testrun_name: str, user_id: int) -> int:
 @flask_auth.auth.login_required
 def import_results(testrun_name: str, job_id: str) -> dict:
     """Upload a JUnit XML file for a given testrun."""
+    # Both segments are interpolated into the upload path below. A
+    # percent-encoded `..` survives the router, so without this an upload
+    # lands outside UPLOAD_FOLDER.
+    common.reject_invalid_segments(testrun_name, job_id)
+
     if "junitxml" not in flask.request.files:
-        response = flask.jsonify(message="No file part")
-        response.status_code = 400
-        flask.abort(response)
+        common.abort_json(400, "No file part")
 
     file = flask.request.files["junitxml"]
-    if file.filename == "":
-        response = flask.jsonify(message="No selected file")
-        response.status_code = 400
-        flask.abort(response)
+    # `not file.filename` also covers None (malformed multipart part), matching
+    # the check in history_api.
+    if not file.filename:
+        common.abort_json(400, "No selected file")
 
     if not (file and allowed_file(Path(file.filename))):
-        response = flask.jsonify(message="Unexpected file type")
-        response.status_code = 400
-        flask.abort(response)
+        common.abort_json(400, "Unexpected file type")
 
     upload_folder = Path(flask.current_app.config["UPLOAD_FOLDER"])
 
@@ -113,9 +116,7 @@ def import_results(testrun_name: str, job_id: str) -> dict:
     filepath = upload_folder / testrun_name / job_id / f"{file_checksum}.xml"
     if filepath.exists():
         upload_filepath.unlink()
-        response = flask.jsonify(message="File was already uploaded")
-        response.status_code = 400
-        flask.abort(response)
+        common.abort_json(400, "File was already uploaded")
 
     upload_filepath.rename(filepath)
 
@@ -128,9 +129,7 @@ def import_results(testrun_name: str, job_id: str) -> dict:
     except ValueError:
         flask.current_app.logger.exception(f"Failed to import testrun '{testrun_name}'")
         filepath.unlink()
-        response = flask.jsonify(message="Failed to import testrun")
-        response.status_code = 400
-        flask.abort(response)
+        common.abort_json(400, "Failed to import testrun")
 
     return {
         "junitxml": f"{upload_folder.name}/{testrun_name}/{job_id}/{file_checksum}.xml",
@@ -139,7 +138,12 @@ def import_results(testrun_name: str, job_id: str) -> dict:
 
 
 def _get_passed_common(testrun_name: str) -> List[str]:
-    """Get tests that already passed."""
+    """Get tests that already passed.
+
+    Deliberately not validated. This path runs only parameterised SQL and
+    never touches the filesystem, so the guard would buy nothing, while
+    making any name already stored outside [A-Za-z0-9_.-] unreadable.
+    """
     conn = flask_db.get_db()
     tests_verdicts = results_cache.load_testrun(
         conn=conn, testrun_name=testrun_name, user_id=flask_auth.auth.current_user()["user_id"]
@@ -149,7 +153,12 @@ def _get_passed_common(testrun_name: str) -> List[str]:
 
 
 def _get_nonpassed_common(testrun_name: str) -> List[str]:
-    """Get tests that haven't passed yet."""
+    """Get tests that haven't passed yet.
+
+    Deliberately not validated. This path runs only parameterised SQL and
+    never touches the filesystem, so the guard would buy nothing, while
+    making any name already stored outside [A-Za-z0-9_.-] unreadable.
+    """
     conn = flask_db.get_db()
     tests_verdicts = results_cache.load_testrun(
         conn=conn, testrun_name=testrun_name, user_id=flask_auth.auth.current_user()["user_id"]
@@ -165,7 +174,15 @@ def _pytestify(tests: List[str]) -> List[str]:
     """
     nodeids = []
     for t in tests:
-        classname, title = t.split("::")
+        # A test name can itself contain "::", e.g. the id pytest writes for
+        # `parametrize("x", ["a::b"])`. Drop it like the two cases below,
+        # rather than raising and wedging the whole testrun.
+        parts = t.split("::")
+        if len(parts) != MAX_TESTID_PARTS:
+            flask.current_app.logger.warning(f"Cannot parse test id {t!r}")
+            continue
+
+        classname, title = parts
         classparts = classname.split(".")
 
         # e.g. find "test_lobster" in

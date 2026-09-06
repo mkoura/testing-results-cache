@@ -12,7 +12,6 @@ string can never collide with a route under `/results/` or `/history/`.
 """
 
 import os
-import re
 import sqlite3
 import tempfile
 import zipfile
@@ -20,7 +19,6 @@ import zlib
 from pathlib import Path
 from typing import List
 from typing import NoReturn
-from typing import Optional
 
 import flask
 from werkzeug.exceptions import HTTPException
@@ -30,10 +28,6 @@ from testing_results_cache import flask_auth
 from testing_results_cache import flask_db
 from testing_results_cache import sync_results_cache
 
-MAX_PATH_SEGMENT_LENGTH = 200
-# Dots are allowed so real-world version strings like "11.1.0" work, but a
-# segment of dots only ("..", ".") is rejected in `_valid_path_segment`.
-_SAFE_SEGMENT_RE = re.compile(r"[A-Za-z0-9_.-]+")
 # A real sync-results bundle (JSON metrics plus a handful of PNGs) is a few
 # MB uncompressed at most. This is a generous ceiling on top of that, not a
 # tight one - it exists only to bound the cost of `_valid_zip` decompressing
@@ -47,15 +41,6 @@ MAX_UNCOMPRESSED_BYTES = 200 * 1000 * 1000
 MAX_ZIP_MEMBERS = 1000
 
 sync_results = flask.Blueprint("sync_results", __name__)
-
-
-def _abort_json(status_code: int, message: str, headers: Optional[dict] = None) -> NoReturn:
-    """Abort the request with a JSON error body."""
-    response = flask.jsonify(message=message)
-    response.status_code = status_code
-    if headers:
-        response.headers.update(headers)
-    flask.abort(response)
 
 
 def _valid_zip(path: Path) -> bool:
@@ -101,25 +86,6 @@ def _valid_zip(path: Path) -> bool:
         return False
 
 
-def _valid_path_segment(value: str) -> bool:
-    # fullmatch, not match: `$` in a pattern would still accept a trailing
-    # newline ("11.1.0%0A" in the URL), fullmatch requires the whole string.
-    return (
-        len(value) <= MAX_PATH_SEGMENT_LENGTH
-        and _SAFE_SEGMENT_RE.fullmatch(value) is not None
-        and value.strip(".") != ""
-    )
-
-
-def _reject_invalid_version(version: str) -> None:
-    if not _valid_path_segment(version):
-        _abort_json(
-            400,
-            f"Invalid path segment {version!r}: only [A-Za-z0-9_.-] "
-            f"(not dots alone), max {MAX_PATH_SEGMENT_LENGTH} chars",
-        )
-
-
 def _sync_results_file(version: str) -> Path:
     folder = Path(flask.current_app.config["SYNC_RESULTS_FOLDER"])
     return folder / f"{version}.zip"
@@ -136,7 +102,7 @@ def _rollback(conn: sqlite3.Connection, version: str) -> None:
 
 def _abort_storage_failure(version: str) -> NoReturn:
     flask.current_app.logger.exception(f"Failed to store sync results for {version}")
-    _abort_json(500, "Failed to store sync results")
+    common.abort_json(500, "Failed to store sync results")
 
 
 def _abort_read_failure(context: str) -> NoReturn:
@@ -146,7 +112,7 @@ def _abort_read_failure(context: str) -> NoReturn:
     # exception, breaking the JSON-error contract every other response on
     # this blueprint keeps (Werkzeug's default HTML page, no logging).
     flask.current_app.logger.exception(f"Failed to read sync results ({context})")
-    _abort_json(500, "Failed to read sync results")
+    common.abort_json(500, "Failed to read sync results")
 
 
 def _finalize_upload_disk_state(
@@ -225,20 +191,20 @@ def _reject_invalid_zip_content(version: str, path: Path) -> None:
     # overwriting good data), so an operator should be able to see it firing.
     if path.stat().st_size == 0:
         flask.current_app.logger.warning(f"Rejected empty sync-results upload for {version}")
-        _abort_json(400, "Empty file")
+        common.abort_json(400, "Empty file")
     if not _valid_zip(path):
         flask.current_app.logger.warning(f"Rejected invalid sync-results zip for {version}")
-        _abort_json(400, "Not a valid zip file")
+        common.abort_json(400, "Not a valid zip file")
 
 
 @sync_results.route("/sync-results/<version>", methods=["PUT", "POST"])
 @flask_auth.auth.login_required
 def upload_sync_results(version: str) -> dict:
     """Store the sync-results zip for a version, replacing any prior upload."""
-    _reject_invalid_version(version)
+    common.reject_invalid_segments(version)
 
     if "syncresults" not in flask.request.files:
-        _abort_json(400, "No file part")
+        common.abort_json(400, "No file part")
 
     file = flask.request.files["syncresults"]
     # `not file.filename` also covers None (malformed multipart part).
@@ -246,7 +212,7 @@ def upload_sync_results(version: str) -> dict:
         not file.filename
         or Path(file.filename).suffix.lower() not in common.ALLOWED_SYNC_RESULTS_EXTENSIONS
     ):
-        _abort_json(400, "Unexpected file type")
+        common.abort_json(400, "Unexpected file type")
 
     conn = flask_db.get_db()
     user_id = flask_auth.auth.current_user()["user_id"]
@@ -262,7 +228,7 @@ def upload_sync_results(version: str) -> dict:
         os.close(tmp_fd)
     except OSError:
         flask.current_app.logger.exception(f"Sync-results storage unavailable for {version}")
-        _abort_json(500, "Failed to store sync results")
+        common.abort_json(500, "Failed to store sync results")
     tmp_filepath = Path(tmp_name)
     prev_filepath = filepath.with_name(filepath.name + ".prev")
 
@@ -318,7 +284,7 @@ def upload_sync_results(version: str) -> dict:
         _rollback(conn, version)
         if "database is locked" in str(exc):
             flask.current_app.logger.warning(f"Sync-results upload for {version} hit database lock")
-            _abort_json(503, "Server busy, try again", headers={"Retry-After": "5"})
+            common.abort_json(503, "Server busy, try again", headers={"Retry-After": "5"})
         _abort_storage_failure(version)
     except Exception:
         _rollback(conn, version)
@@ -364,7 +330,7 @@ def list_sync_results() -> List[dict]:
 @flask_auth.auth.login_required
 def get_sync_results_zip(version: str) -> flask.Response:
     """Download the stored sync-results zip for a version."""
-    _reject_invalid_version(version)
+    common.reject_invalid_segments(version)
 
     conn = flask_db.get_db()
     try:
@@ -372,7 +338,7 @@ def get_sync_results_zip(version: str) -> flask.Response:
     except sqlite3.Error:
         _abort_read_failure(version)
     if not exists:
-        _abort_json(404, "No sync results found for this version")
+        common.abort_json(404, "No sync results found for this version")
 
     filepath = _sync_results_file(version=version)
     if not filepath.is_file():
@@ -387,6 +353,6 @@ def get_sync_results_zip(version: str) -> flask.Response:
         flask.current_app.logger.error(
             f"Sync-results DB row exists for {version} but file {filepath} is missing"
         )
-        _abort_json(404, "No sync results found for this version")
+        common.abort_json(404, "No sync results found for this version")
 
     return flask.send_file(filepath, mimetype="application/zip")
