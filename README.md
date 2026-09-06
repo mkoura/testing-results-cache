@@ -241,3 +241,12 @@ curl -u username:password http://localhost:5000/sync-results/11.1.0/zip
 ```sh
 make test
 ```
+
+## Run linters
+
+```sh
+make lint
+```
+
+Runs the same hooks CI runs. `make init-lint` installs them as a git pre-commit
+hook if you want them on every commit.
