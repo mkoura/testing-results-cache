@@ -54,3 +54,10 @@ CREATE TABLE sync_results (
     -- sync_results_cache.py itself.
     timestamp TEXT NOT NULL
 );
+
+-- Kept in step with migrations/002_indexes.sql, so a database created from
+-- this file matches one that was migrated. `results` grows with every import
+-- and is scanned by the four query routes.
+CREATE INDEX idx_results_testrun_user ON results(testrun_id, user_id);
+CREATE INDEX idx_testrun_name ON testrun(name);
+CREATE INDEX idx_users_name ON users(name);
