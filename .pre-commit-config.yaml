@@ -33,3 +33,7 @@ repos:
     entry: mypy
     language: system
     types: [python]
+    # Serial on purpose. Otherwise pre-commit splits the files across several
+    # mypy processes that share one .mypy_cache, which throws an intermittent
+    # INTERNAL ERROR that passes on a re-run.
+    require_serial: true
