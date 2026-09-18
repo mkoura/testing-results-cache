@@ -10,6 +10,7 @@ import flask
 from testing_results_cache import flask_db
 from testing_results_cache import history_api
 from testing_results_cache import results_api
+from testing_results_cache import sync_results_api
 
 INSTANCE_PATH = Path(__file__).parent.parent / "instance_dev"
 
@@ -42,6 +43,7 @@ def create_app() -> flask.Flask:
         DATABASE=str(instance_path / "testing_results_cache.db"),
         UPLOAD_FOLDER=str(instance_path / "uploads"),
         HISTORY_FOLDER=str(instance_path / "history"),
+        SYNC_RESULTS_FOLDER=str(instance_path / "sync_results"),
         MAX_CONTENT_LENGTH=16 * 1000 * 1000,  # 16MB
     )
 
@@ -55,5 +57,6 @@ def create_app() -> flask.Flask:
 
     app.register_blueprint(results_api.results)
     app.register_blueprint(history_api.history)
+    app.register_blueprint(sync_results_api.sync_results)
 
     return app

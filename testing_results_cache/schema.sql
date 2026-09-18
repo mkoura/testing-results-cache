@@ -2,6 +2,7 @@ DROP TABLE IF EXISTS users;
 DROP TABLE IF EXISTS testrun;
 DROP TABLE IF EXISTS results;
 DROP TABLE IF EXISTS history;
+DROP TABLE IF EXISTS sync_results;
 
 CREATE TABLE users (
     id INTEGER PRIMARY KEY,
@@ -39,4 +40,17 @@ CREATE TABLE history (
     -- by history_cache.py itself.
     timestamp TEXT NOT NULL,
     UNIQUE (testrun_name, job_id)
+);
+
+-- Cached sync-test-results zips (JSON metrics + rendered graphs), keyed by
+-- cardano-node version only. Unlike history, this upserts: a new upload
+-- for a version replaces whatever was stored for it before, so there is
+-- only ever one row per version.
+CREATE TABLE sync_results (
+    version TEXT PRIMARY KEY,
+    user_id INTEGER,
+    -- Deliberately TEXT, not TIMESTAMP: see the comment on history.timestamp
+    -- above. Same reasoning, same format, formatted/parsed by
+    -- sync_results_cache.py itself.
+    timestamp TEXT NOT NULL
 );

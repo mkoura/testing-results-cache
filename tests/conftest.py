@@ -25,6 +25,7 @@ def app(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> flask.Flask:
         DATABASE=str(tmp_path / "test.db"),
         UPLOAD_FOLDER=str(tmp_path / "uploads"),
         HISTORY_FOLDER=str(tmp_path / "history"),
+        SYNC_RESULTS_FOLDER=str(tmp_path / "sync_results"),
     )
 
     with flask_app.app_context():
