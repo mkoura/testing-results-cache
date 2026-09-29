@@ -114,35 +114,24 @@ class SyncResultsEntry(NamedTuple):
 class TestrunStatsEntry(NamedTuple):
     """Counts for one test run, as uploaded by the client.
 
-    The five identity fields together are unique. `cases` is the total after
-    the client grouped its result files per test, and `passed`/`failed`/
-    `broken`/`skipped` are allure statuses - anything else the client saw is
-    `cases` minus those four, so it is derived rather than stored.
-
-    `never_run` is a subset of `skipped`, not a sibling bucket: a test the
-    registration pass registered and the real run never reached carries
-    status "skipped". Above zero it means the run was interrupted, so every
-    count here is a floor rather than a total.
-
     Attributes:
         project: The repository the testrun belongs to.
         testrun_name: The name the testrun was reported under.
         run_id: The CI run number, or a generated id for a local run.
         step: The step name, `main` unless this is upgrade testing.
         origin: `ci` or `local`.
-        timestamp: When the testrun started, tz-aware UTC. Attached by
-            `stats_cache._parse_timestamp` when rows are read back.
+        timestamp: When the testrun started, tz-aware UTC.
         cases: Total tests after grouping.
         passed: Tests with allure status `passed`.
         failed: Tests with allure status `failed`.
         broken: Tests with allure status `broken`.
         skipped: Tests with allure status `skipped`.
-        never_run: Registered tests that never got a real result.
+        never_run: Registered tests that never got a real result. A subset
+            of `skipped`. Above zero means the run was interrupted.
         duration: Wall clock span of the testrun, in seconds.
         exit_code: pytest's own exit code.
         filtered: True when the run covered only a subset of the tests.
-        payload: The uploaded JSON document, re-serialised canonically. The
-            values all survive; key order and whitespace do not.
+        payload: The uploaded JSON document, re-serialised canonically.
     """
 
     project: str
@@ -167,15 +156,13 @@ class TestrunStatsEntry(NamedTuple):
         """Tests whose status was none of the four allure statuses.
 
         Returns:
-            `cases` minus the four status buckets, which is never negative
-            because the API layer refuses a payload whose buckets exceed the
-            total.
+            `cases` minus the four status buckets.
         """
         return self.cases - self.passed - self.failed - self.broken - self.skipped
 
 
 class TestrunStatsTotals(NamedTuple):
-    """Sums across a set of runs, for the "how much testing did we do" question.
+    """Sums across a set of runs.
 
     Attributes:
         runs: How many rows were summed.
@@ -185,8 +172,7 @@ class TestrunStatsTotals(NamedTuple):
         broken: Tests with allure status `broken`.
         skipped: Tests with allure status `skipped`.
         never_run: Registered tests that never got a real result. Above zero
-            means interrupted runs were included, so the other totals are a
-            floor rather than a total.
+            means interrupted runs are included.
         duration: Summed wall clock time, in seconds.
     """
 
@@ -196,9 +182,6 @@ class TestrunStatsTotals(NamedTuple):
     failed: int
     broken: int
     skipped: int
-    # Summed as well as the buckets: without it a caller of the aggregate has
-    # no way to know that interrupted runs were included, and the totals would
-    # read as complete when they are a floor.
     never_run: int
     duration: float
 
@@ -207,8 +190,6 @@ class TestrunStatsTotals(NamedTuple):
         """Tests whose status was none of the four allure statuses.
 
         Returns:
-            `cases` minus the four status buckets, which is never negative
-            because the API layer refuses a payload whose buckets exceed the
-            total.
+            `cases` minus the four status buckets.
         """
         return self.cases - self.passed - self.failed - self.broken - self.skipped

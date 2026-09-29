@@ -56,10 +56,7 @@ CREATE TABLE sync_results (
     timestamp TEXT NOT NULL
 );
 
--- Per-run counts, uploaded as a small JSON document by the client. The
--- server never parses a test report. Kept in step with
--- migrations/003_testrun_stats.sql - see that file for why each column
--- exists, and for why the counts come from allure rather than JUnit.
+-- Kept in step with migrations/003_testrun_stats.sql, which comments each column.
 CREATE TABLE testrun_stats (
     id INTEGER PRIMARY KEY,
     project TEXT NOT NULL,
@@ -68,8 +65,7 @@ CREATE TABLE testrun_stats (
     step TEXT NOT NULL,
     origin TEXT NOT NULL,
     user_id INTEGER,
-    -- Deliberately TEXT, not TIMESTAMP: see the comment on history.timestamp
-    -- above. Same reasoning, same format, formatted/parsed by stats_cache.py.
+    -- TEXT, not TIMESTAMP: see the comment on history.timestamp above.
     timestamp TEXT NOT NULL,
     cases INTEGER NOT NULL,
     passed INTEGER NOT NULL,

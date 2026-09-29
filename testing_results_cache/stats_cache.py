@@ -1,17 +1,7 @@
 """Helper functions for the testrun_stats table.
 
-Unlike history_cache.py, which records only that a file landed, this stores
-the numbers themselves - the client has already done the counting. The
-server never parses a test report here.
-
-The timestamps in this table come from the client, not from `datetime.now`,
-so the storage format is not self-enforcing the way it is in the other two
-cache modules. `timestamp_round_trips` exists for that, and the API layer
-calls it before any row is written.
-
-Like sync_results_cache.py, a re-upload for the same run replaces the row
-instead of being rejected as a duplicate: the uploader runs at the end of a
-test script and may legitimately be retried.
+A re-upload for the same run replaces the row, so the uploader is safe to
+retry.
 """
 
 import logging
@@ -25,14 +15,9 @@ from testing_results_cache import common
 
 LOGGER = logging.getLogger(__name__)
 
-# See the comment on testrun_stats.timestamp in schema.sql - never rely on
-# sqlite3's own datetime adapter/converter for this column. Same format as
-# history_cache.py and sync_results_cache.py, for the same reason.
+# Same format as history_cache.py. See history.timestamp in schema.sql.
 TIMESTAMP_FORMAT = "%Y-%m-%d %H:%M:%S.%f"
 
-# Bound on how many rows a single listing returns, so one request cannot ask
-# the service to build an unbounded JSON document. The read routes also
-# accept a smaller `limit`.
 MAX_LIST_ROWS = 1000
 
 
@@ -66,12 +51,8 @@ def _parse_timestamp(value: str) -> datetime:
 def timestamp_round_trips(value: datetime) -> bool:
     """Check a timestamp survives being written and read back.
 
-    Unlike the other two tables, the timestamps here come from the client, so
-    the storage format cannot be assumed to fit. `strftime("%Y")` does not
-    zero-pad while `strptime("%Y")` requires four digits, so a year below 1000
-    formats to something that can never be parsed again. Checked by doing the
-    round trip rather than by testing the year, so this stays correct if
-    TIMESTAMP_FORMAT changes.
+    The timestamp comes from the client. `strftime("%Y")` does not zero-pad
+    a year below 1000, and `strptime("%Y")` cannot read it back.
 
     Args:
         value: The tz-aware UTC timestamp a client sent.
@@ -89,15 +70,6 @@ def save_testrun_stats(
     conn: sqlite3.Connection, entry: common.TestrunStatsEntry, user_id: int
 ) -> None:
     """Upsert the row for this run. Does not commit.
-
-    `user_id` is passed separately rather than living on the entry, the
-    same way sync_results_cache does it: it is an upload record, not part
-    of the run's identity, and nothing reads it back.
-
-    The caller owns the transaction, matching the other two cache modules.
-    There is no file to put in place here, so the caller commits straight
-    after, but keeping the split means the API layer decides what a failure
-    rolls back.
 
     Args:
         conn: An open database connection.
@@ -145,11 +117,6 @@ def _window_clause(
 ) -> tp.Tuple[str, tp.List]:
     """Build the shared WHERE clause for the two read paths.
 
-    Interrupted runs (`never_run > 0`) are deliberately NOT excluded here.
-    They are real runs and hiding them would understate the work done; the
-    column is exposed instead so a caller can decide. See the note on
-    `never_run` in common.TestrunStatsEntry.
-
     Args:
         project: Limit to one project, or None for every project.
         days: Limit to runs this recent, or None for no time limit.
@@ -167,14 +134,8 @@ def _window_clause(
         clauses.append("origin = ?")
         params.append(origin)
     if days is not None:
-        # Compared as text. That is sound only because every stored value is
-        # zero-padded and fixed-width, which the API layer enforces with
-        # `timestamp_round_trips` before any row is written - here the
-        # timestamps come from the client, so unlike history_cache and
-        # sync_results_cache the format is not self-enforcing.
-        #
-        # `timedelta`, not a float epoch round trip: same arithmetic as
-        # history_cache's day window, without the lossy conversion.
+        # Chronological as text: the format is fixed-width, and
+        # timestamp_round_trips refuses a year below 1000.
         cutoff = datetime.now(UTC) - timedelta(days=days)
         clauses.append("timestamp >= ?")
         params.append(_format_timestamp(cutoff))
@@ -229,19 +190,13 @@ def list_testrun_stats(
     limit: int = MAX_LIST_ROWS,
     origin: tp.Optional[str] = None,
 ) -> tp.List[common.TestrunStatsEntry]:
-    """List matching runs, newest first.
-
-    A row with an unparseable timestamp is skipped rather than failing the
-    whole listing, matching sync_results_cache.list_sync_results - one bad
-    row should not hide every other run from a caller with nothing to do
-    with it. It is still logged so an operator can find it.
+    """List matching runs, newest first, skipping a row whose timestamp cannot be parsed.
 
     Args:
         conn: An open database connection.
         project: Limit to one project, or None for every project.
         days: Limit to runs this recent, or None for no time limit.
-        limit: Maximum rows to return. Values above MAX_LIST_ROWS are
-            clamped here; the API layer refuses them outright instead.
+        limit: Maximum rows to return, clamped to MAX_LIST_ROWS.
         origin: Limit to one origin, `ci` or `local`, or None for both.
 
     Returns:
@@ -250,12 +205,8 @@ def list_testrun_stats(
     """
     where, params = _window_clause(project, days, origin)
     capped = max(1, min(limit, MAX_LIST_ROWS))
-    # Fetched up to the hard cap and trimmed to `capped` only after the
-    # unparseable rows are dropped. Applying the caller's limit in SQL would
-    # let a single bad row inside the window shorten the answer - at
-    # `limit=1`, one bad row returns an empty list while good rows sit right
-    # behind it. The work stays bounded, because MAX_LIST_ROWS is the same
-    # ceiling the SQL had before.
+    # The limit is applied after bad rows are skipped, so they cannot shorten
+    # the answer.
     cur = conn.cursor()
     cur.execute(
         "SELECT project, testrun_name, run_id, step, origin, timestamp, "

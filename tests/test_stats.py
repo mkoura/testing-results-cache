@@ -1,19 +1,8 @@
 """Tests for the per-run statistics endpoints (/stats...).
 
-Deliberately separate from /import and /history: the server stores counts the
-client computed and never parses a test report. The properties that matter
-are that a payload it cannot store faithfully is refused, that a re-upload of
-the same run replaces rather than duplicates, and that the aggregates count
-only what was actually stored.
-
 The counts in VALID_PAYLOAD are the real output of
-`scripts/count_test_results.py` on a real allure results directory from
-cardano-node-tests (2145 tests, 1892 passed, 253 skipped), so the happy path
-uses numbers a real client actually produces.
-
-Several tests here cover values that only a client can supply. This is the
-first table whose timestamps and counts are not server-generated, so the
-range and finiteness checks are load-bearing rather than defensive.
+`scripts/count_test_results.py` on a cardano-node-tests allure results
+directory.
 """
 
 import base64
@@ -305,11 +294,7 @@ class TestValidation:
     def test_rejects_the_json_constants_python_accepts(
         self, app: flask.Flask, client: flask.testing.FlaskClient, auth_headers: dict, literal: str
     ) -> None:
-        """json.loads accepts these; JSON does not, and a browser cannot read them back.
-
-        One stored non-finite duration would make SUM(duration) - and so the
-        whole unfiltered GET /stats body - unparseable for every caller.
-        """
+        """Refuse the NaN and Infinity literals, which json.loads accepts."""
         body = json.dumps(VALID_PAYLOAD).replace(str(TOTAL_DURATION), literal)
 
         response = _put(client, auth_headers, body)
@@ -458,13 +443,7 @@ class TestValidation:
     def test_counts_cannot_overflow_the_sum_across_rows(
         self, client: flask.testing.FlaskClient, auth_headers: dict
     ) -> None:
-        """A per-field bound alone does not stop SUM() overflowing.
-
-        Two rows of 2**62 are each individually under the sqlite integer
-        limit, but their sum is not, and `SUM(cases)` then raises
-        `integer overflow` - breaking every GET /stats variant permanently,
-        with no delete route to recover.
-        """
+        """Refuse counts large enough to overflow SUM() across rows."""
         counts = {**VALID_PAYLOAD["counts"], "total": 2**62}
         for run_id in ("a", "b"):
             response = _put(client, auth_headers, _payload(run_id=run_id, counts=counts))
@@ -493,12 +472,7 @@ class TestValidation:
     def test_rejects_a_numeric_literal_that_overflows_to_infinity(
         self, app: flask.Flask, client: flask.testing.FlaskClient, auth_headers: dict, literal: str
     ) -> None:
-        """`1e400` is an ordinary number literal, so parse_constant never fires.
-
-        Left through, it reaches the stored payload as the token `Infinity`,
-        which breaks the promise that the column always holds readable JSON -
-        the whole reason the column exists.
-        """
+        """Refuse a number literal that overflows to infinity, such as `1e400`."""
         body = json.dumps(VALID_PAYLOAD).replace('"cardano_node": "10.5.0"', f'"x": {literal}')
 
         response = _put(client, auth_headers, body)
@@ -509,12 +483,7 @@ class TestValidation:
     def test_a_non_ascii_payload_round_trips(
         self, app: flask.Flask, client: flask.testing.FlaskClient, auth_headers: dict
     ) -> None:
-        """Store non-ASCII values unchanged, and without inflating the column.
-
-        The column is written with `ensure_ascii=False`. With the default,
-        every non-ASCII character becomes a six-byte unicode escape, so a
-        body inside MAX_PAYLOAD_BYTES could still store three times that.
-        """
+        """Store non-ASCII values unchanged, and without inflating the column."""
         text = "cardano \u4e2d\u6587 \U0001f600 caf\u00e9"
         _ok(client, auth_headers, _payload(note=text))
 
@@ -609,13 +578,7 @@ class TestValidation:
     def test_duration_cannot_overflow_the_sum_across_rows(
         self, client: flask.testing.FlaskClient, auth_headers: dict
     ) -> None:
-        """Keep the totals parseable however many large durations are stored.
-
-        A float sum does not raise on overflow the way an integer one does.
-        It becomes `inf`, and the response then carries the bare token
-        `Infinity`, which is not valid JSON - the same failure the parse
-        hooks refuse on the way in.
-        """
+        """Keep the totals parseable however many large durations are stored."""
         for run_id in ("a", "b"):
             response = _put(client, auth_headers, _payload(run_id=run_id, duration=1e308))
             assert response.status_code == http.HTTPStatus.BAD_REQUEST
@@ -683,11 +646,7 @@ class TestValidation:
     def test_rejects_a_timestamp_that_overflows_on_conversion(
         self, app: flask.Flask, client: flask.testing.FlaskClient, auth_headers: dict, bad: str
     ) -> None:
-        """Fromisoformat accepts +/-24h offsets, so a near-limit year overflows.
-
-        Unhandled this escapes as Werkzeug's HTML 500 and breaks the
-        JSON-error contract the rest of the service keeps.
-        """
+        """Refuse a timestamp that overflows on conversion to UTC."""
         response = _put(client, auth_headers, _payload(timestamp=bad))
 
         assert response.status_code == http.HTTPStatus.BAD_REQUEST
@@ -698,11 +657,7 @@ class TestValidation:
     def test_rejects_a_year_the_storage_format_cannot_read_back(
         self, app: flask.Flask, client: flask.testing.FlaskClient, auth_headers: dict, bad: str
     ) -> None:
-        """strftime("%Y") does not zero-pad but strptime("%Y") needs four digits.
-
-        Such a row would be counted by GET /stats and invisible to
-        GET /stats/runs, so the two routes would disagree forever.
-        """
+        """Refuse a year below 1000, which the storage format cannot read back."""
         response = _put(client, auth_headers, _payload(timestamp=bad))
 
         assert response.status_code == http.HTTPStatus.BAD_REQUEST
@@ -838,11 +793,7 @@ class TestTotals:
     def test_rejects_an_unknown_origin(
         self, client: flask.testing.FlaskClient, auth_headers: dict, bad: str
     ) -> None:
-        """Refuse a bad filter rather than return an empty result.
-
-        An empty result reads as "no runs", which is a very different thing
-        from "your filter was a typo".
-        """
+        """Refuse a bad filter rather than return an empty result."""
         response = client.get(f"/stats?origin={bad}", headers=auth_headers)
 
         assert response.status_code == http.HTTPStatus.BAD_REQUEST
@@ -916,12 +867,7 @@ class TestListRuns:
     def test_a_limit_is_filled_when_enough_valid_rows_exist(
         self, app: flask.Flask, client: flask.testing.FlaskClient, auth_headers: dict
     ) -> None:
-        """Do not let one unreadable row shorten the answer.
-
-        The limit is applied after the unparseable rows are dropped. With it
-        applied in SQL instead, `limit=1` returned an empty list whenever a
-        bad row happened to sort first.
-        """
+        """Do not let one unreadable row shorten the answer."""
         for run_id in RUN_IDS:
             _ok(client, auth_headers, _payload(run_id=run_id, timestamp=_now_iso()))
 
