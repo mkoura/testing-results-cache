@@ -264,7 +264,7 @@ The same HTTP basic auth as every other route. The "token" is the password
 half of the credentials pair, so no separate token store exists:
 
 ```sh
-flask --app testing_results_cache add-user stats <token>
+flask --app testing_results_cache.app:create_app add-user --username stats
 ```
 
 Put `stats:<token>` in CI secrets, and export it locally for a local test run.

@@ -19,8 +19,8 @@ never collide with a route under `/results/`, `/history/` or
 
 Auth is the service's existing HTTP basic auth, same as every other route.
 The "token" is the password half of the credentials pair: create a user with
-`flask --app testing_results_cache add-user stats <token>`, put the pair in
-CI secrets, and export it locally. Nothing here needs a second auth path.
+`add-user` (see the README), put the pair in CI secrets, and export it
+locally. Nothing here needs a second auth path.
 """
 
 import json
