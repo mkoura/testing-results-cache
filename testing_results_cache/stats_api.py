@@ -53,6 +53,11 @@ MAX_PAYLOAD_BYTES = 64 * 1000
 # field is a usable URL segment for the read routes.
 DEFAULT_STEP = "main"
 
+# The only two origins a client may filter on. A run is `ci` when
+# `GITHUB_ACTIONS` is set and `local` otherwise, so anything else is a typo
+# that would silently return an empty result.
+VALID_ORIGINS = frozenset({"ci", "local"})
+
 # Guards the day window on the read routes. A year of history is more than
 # any dashboard panel asks for, and it keeps the scan bounded.
 MAX_DAYS = 366
@@ -504,6 +509,30 @@ def _parse_project_arg() -> tp.Optional[str]:
     return project
 
 
+def _parse_origin_arg() -> tp.Optional[str]:
+    """Read the optional `origin` query parameter.
+
+    Without this filter an aggregate counts a developer's local runs together
+    with CI runs, which is the one thing the `origin` column exists to keep
+    apart.
+
+    Returns:
+        The origin to filter on, or None for every origin.
+
+    Raises:
+        HTTPException: 400 when the value is not `ci` or `local`. An unknown
+            value is refused rather than returning an empty result, which
+            would look like "no runs" instead of "bad filter".
+    """
+    value = flask.request.args.get("origin")
+    if value is None:
+        return None
+    if value not in VALID_ORIGINS:
+        allowed = ", ".join(sorted(VALID_ORIGINS))
+        common.abort_json(400, f"Query parameter 'origin' must be one of: {allowed}")
+    return str(value)
+
+
 def _entry_dict(entry: common.TestrunStatsEntry) -> dict:
     """Render one run for the listing route.
 
@@ -636,10 +665,11 @@ def get_totals() -> dict:
     """
     project = _parse_project_arg()
     days = _parse_days()
+    origin = _parse_origin_arg()
 
     conn = flask_db.get_db()
     try:
-        totals = stats_cache.get_totals(conn=conn, project=project, days=days)
+        totals = stats_cache.get_totals(conn=conn, project=project, days=days, origin=origin)
     except sqlite3.Error:
         _abort_read_failure("totals")
 
@@ -667,6 +697,7 @@ def get_totals() -> dict:
         "duration": totals.duration,
         "project": project,
         "days": days,
+        "origin": origin,
     }
 
 
@@ -685,10 +716,13 @@ def list_runs() -> tp.List[dict]:
     project = _parse_project_arg()
     days = _parse_days()
     limit = _parse_limit()
+    origin = _parse_origin_arg()
 
     conn = flask_db.get_db()
     try:
-        entries = stats_cache.list_testrun_stats(conn=conn, project=project, days=days, limit=limit)
+        entries = stats_cache.list_testrun_stats(
+            conn=conn, project=project, days=days, limit=limit, origin=origin
+        )
     except sqlite3.Error:
         _abort_read_failure("listing")
 

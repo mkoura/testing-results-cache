@@ -140,7 +140,9 @@ def save_testrun_stats(
     )
 
 
-def _window_clause(project: tp.Optional[str], days: tp.Optional[int]) -> tp.Tuple[str, tp.List]:
+def _window_clause(
+    project: tp.Optional[str], days: tp.Optional[int], origin: tp.Optional[str] = None
+) -> tp.Tuple[str, tp.List]:
     """Build the shared WHERE clause for the two read paths.
 
     Interrupted runs (`never_run > 0`) are deliberately NOT excluded here.
@@ -151,6 +153,7 @@ def _window_clause(project: tp.Optional[str], days: tp.Optional[int]) -> tp.Tupl
     Args:
         project: Limit to one project, or None for every project.
         days: Limit to runs this recent, or None for no time limit.
+        origin: Limit to one origin, `ci` or `local`, or None for both.
 
     Returns:
         Tuple of (WHERE clause including its leading space, bind parameters).
@@ -160,6 +163,9 @@ def _window_clause(project: tp.Optional[str], days: tp.Optional[int]) -> tp.Tupl
     if project:
         clauses.append("project = ?")
         params.append(project)
+    if origin:
+        clauses.append("origin = ?")
+        params.append(origin)
     if days is not None:
         # Compared as text. That is sound only because every stored value is
         # zero-padded and fixed-width, which the API layer enforces with
@@ -177,7 +183,10 @@ def _window_clause(project: tp.Optional[str], days: tp.Optional[int]) -> tp.Tupl
 
 
 def get_totals(
-    conn: sqlite3.Connection, project: tp.Optional[str] = None, days: tp.Optional[int] = None
+    conn: sqlite3.Connection,
+    project: tp.Optional[str] = None,
+    days: tp.Optional[int] = None,
+    origin: tp.Optional[str] = None,
 ) -> common.TestrunStatsTotals:
     """Sum the counts across every matching run.
 
@@ -185,11 +194,12 @@ def get_totals(
         conn: An open database connection.
         project: Limit to one project, or None for every project.
         days: Limit to runs this recent, or None for no time limit.
+        origin: Limit to one origin, `ci` or `local`, or None for both.
 
     Returns:
         The summed counts, with `runs` holding how many rows were summed.
     """
-    where, params = _window_clause(project, days)
+    where, params = _window_clause(project, days, origin)
     cur = conn.cursor()
     cur.execute(
         "SELECT COUNT(*), "
@@ -217,6 +227,7 @@ def list_testrun_stats(
     project: tp.Optional[str] = None,
     days: tp.Optional[int] = None,
     limit: int = MAX_LIST_ROWS,
+    origin: tp.Optional[str] = None,
 ) -> tp.List[common.TestrunStatsEntry]:
     """List matching runs, newest first.
 
@@ -231,12 +242,13 @@ def list_testrun_stats(
         days: Limit to runs this recent, or None for no time limit.
         limit: Maximum rows to return. Values above MAX_LIST_ROWS are
             clamped here; the API layer refuses them outright instead.
+        origin: Limit to one origin, `ci` or `local`, or None for both.
 
     Returns:
         Up to `limit` runs, newest first, minus any row whose stored
         timestamp could not be parsed.
     """
-    where, params = _window_clause(project, days)
+    where, params = _window_clause(project, days, origin)
     capped = max(1, min(limit, MAX_LIST_ROWS))
     # Fetched up to the hard cap and trimmed to `capped` only after the
     # unparseable rows are dropped. Applying the caller's limit in SQL would

@@ -819,6 +819,35 @@ class TestTotals:
         assert response.status_code == http.HTTPStatus.BAD_REQUEST
         assert "days" in response.json["message"]
 
+    def test_narrows_by_origin(self, client: flask.testing.FlaskClient, auth_headers: dict) -> None:
+        """Keep a developer's local run out of the CI numbers."""
+        _ok(client, auth_headers, _payload(run_id="ci-run", origin="ci"))
+        _ok(client, auth_headers, _payload(run_id="dev-run", origin="local"))
+
+        ci_totals = client.get("/stats?origin=ci", headers=auth_headers).json
+        local_totals = client.get("/stats?origin=local", headers=auth_headers).json
+        both = client.get("/stats", headers=auth_headers).json
+
+        assert ci_totals["runs"] == 1
+        assert ci_totals["origin"] == "ci"
+        assert local_totals["runs"] == 1
+        assert both["runs"] == ROWS_FOR_TWO_IDENTITIES
+        assert both["origin"] is None
+
+    @pytest.mark.parametrize("bad", ["CI", "ci ", "nightly", ""])
+    def test_rejects_an_unknown_origin(
+        self, client: flask.testing.FlaskClient, auth_headers: dict, bad: str
+    ) -> None:
+        """Refuse a bad filter rather than return an empty result.
+
+        An empty result reads as "no runs", which is a very different thing
+        from "your filter was a typo".
+        """
+        response = client.get(f"/stats?origin={bad}", headers=auth_headers)
+
+        assert response.status_code == http.HTTPStatus.BAD_REQUEST
+        assert "origin" in response.json["message"]
+
     def test_rejects_an_unusable_project_filter(
         self, client: flask.testing.FlaskClient, auth_headers: dict
     ) -> None:
@@ -854,6 +883,25 @@ class TestListRuns:
         runs = client.get("/stats/runs?days=7", headers=auth_headers).json
 
         assert [r["run_id"] for r in runs] == ["recent"]
+
+    def test_listing_narrows_by_origin(
+        self, client: flask.testing.FlaskClient, auth_headers: dict
+    ) -> None:
+        """The origin filter applies to the listing, not only the totals."""
+        _ok(client, auth_headers, _payload(run_id="ci-run", origin="ci"))
+        _ok(client, auth_headers, _payload(run_id="dev-run", origin="local"))
+
+        listed = client.get("/stats/runs?origin=local", headers=auth_headers).json
+
+        assert [r["run_id"] for r in listed] == ["dev-run"]
+
+    def test_listing_rejects_an_unknown_origin(
+        self, client: flask.testing.FlaskClient, auth_headers: dict
+    ) -> None:
+        """Both read routes refuse a bad origin the same way."""
+        response = client.get("/stats/runs?origin=nightly", headers=auth_headers)
+
+        assert response.status_code == http.HTTPStatus.BAD_REQUEST
 
     def test_limit_caps_the_listing(
         self, client: flask.testing.FlaskClient, auth_headers: dict

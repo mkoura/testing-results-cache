@@ -335,7 +335,15 @@ Notes on the fields:
 curl -u stats:token 'http://localhost:5000/stats?project=cardano-node-tests&days=30'
 ```
 
-`project` and `days` are both optional. `days` must be between 1 and 366.
+`project`, `days` and `origin` are all optional. `days` must be between 1 and
+366. `origin` must be `ci` or `local`; an unknown value is refused rather than
+returning an empty result.
+
+Use `origin` to keep a developer's local run out of the CI numbers:
+
+```sh
+curl -u stats:token 'http://localhost:5000/stats?origin=ci'
+```
 
 The response sums `runs`, `cases`, `passed`, `failed`, `broken`, `skipped`,
 `never_run` and `duration`, and reports `other` the same way the per-run
@@ -353,7 +361,12 @@ the stored document, so it stays safe to build a summary page on.
 
 `limit` must be between 1 and 1000. A larger value is refused rather than
 quietly capped: there is no cursor on this route, so a truncated listing would
-otherwise look complete.
+otherwise look complete. `origin` works here too.
+
+A run is `ci` when the uploader saw `GITHUB_ACTIONS` set, and `local`
+otherwise. Together with `project`, `testrun_name`, `run_id` and `step` it
+forms the run's identity, so a local run can never overwrite a CI run even if
+a developer reuses the CI testrun name.
 
 ## Run tests
 
