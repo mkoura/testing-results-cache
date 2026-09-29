@@ -124,9 +124,25 @@ class TestrunStatsEntry(NamedTuple):
     status "skipped". Above zero it means the run was interrupted, so every
     count here is a floor rather than a total.
 
-    `timestamp` is always tz-aware UTC, attached by
-    `stats_cache._parse_timestamp` when rows are read back. `payload` is the
-    uploaded JSON document, stored verbatim.
+    Attributes:
+        project: The repository the testrun belongs to.
+        testrun_name: The name the testrun was reported under.
+        run_id: The CI run number, or a generated id for a local run.
+        step: The step name, `main` unless this is upgrade testing.
+        origin: `ci` or `local`.
+        timestamp: When the testrun started, tz-aware UTC. Attached by
+            `stats_cache._parse_timestamp` when rows are read back.
+        cases: Total tests after grouping.
+        passed: Tests with allure status `passed`.
+        failed: Tests with allure status `failed`.
+        broken: Tests with allure status `broken`.
+        skipped: Tests with allure status `skipped`.
+        never_run: Registered tests that never got a real result.
+        duration: Wall clock span of the testrun, in seconds.
+        exit_code: pytest's own exit code.
+        filtered: True when the run covered only a subset of the tests.
+        payload: The uploaded JSON document, re-serialised canonically. The
+            values all survive; key order and whitespace do not.
     """
 
     project: str
@@ -148,12 +164,31 @@ class TestrunStatsEntry(NamedTuple):
 
     @property
     def other(self) -> int:
-        """Tests whose status was none of the four allure statuses."""
+        """Tests whose status was none of the four allure statuses.
+
+        Returns:
+            `cases` minus the four status buckets, which is never negative
+            because the API layer refuses a payload whose buckets exceed the
+            total.
+        """
         return self.cases - self.passed - self.failed - self.broken - self.skipped
 
 
 class TestrunStatsTotals(NamedTuple):
-    """Sums across a set of runs, for the "how much testing did we do" question."""
+    """Sums across a set of runs, for the "how much testing did we do" question.
+
+    Attributes:
+        runs: How many rows were summed.
+        cases: Total tests across those runs.
+        passed: Tests with allure status `passed`.
+        failed: Tests with allure status `failed`.
+        broken: Tests with allure status `broken`.
+        skipped: Tests with allure status `skipped`.
+        never_run: Registered tests that never got a real result. Above zero
+            means interrupted runs were included, so the other totals are a
+            floor rather than a total.
+        duration: Summed wall clock time, in seconds.
+    """
 
     runs: int
     cases: int
@@ -169,5 +204,11 @@ class TestrunStatsTotals(NamedTuple):
 
     @property
     def other(self) -> int:
-        """Tests whose status was none of the four allure statuses."""
+        """Tests whose status was none of the four allure statuses.
+
+        Returns:
+            `cases` minus the four status buckets, which is never negative
+            because the API layer refuses a payload whose buckets exceed the
+            total.
+        """
         return self.cases - self.passed - self.failed - self.broken - self.skipped
