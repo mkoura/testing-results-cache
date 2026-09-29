@@ -96,17 +96,58 @@ class TestTimestamp:
         data = junittools.get_testsuite_data(junit_file=junit_file)
         assert data.timestamp == datetime(2026, 8, 5, 1, 0, 0, tzinfo=UTC)
 
-    def test_a_non_utc_offset_is_not_handled(self, tmp_path: Path) -> None:
-        """Known limitation, pinned so a change is deliberate.
+    def test_a_non_utc_offset_is_converted_to_utc(self, tmp_path: Path) -> None:
+        """Was pinned as a known limitation. Changed deliberately, 2026-09-21.
 
-        Only `+00:00` is stripped, so a report written in another timezone
-        raises. Runners are UTC, which is why this has never bitten.
+        The old note read: "Only `+00:00` is stripped, so a report written in
+        another timezone raises. Runners are UTC, which is why this has never
+        bitten." That last clause is what changed. The stats endpoint accepts
+        reports from developer machines, which are not UTC, so the limitation
+        moved from harmless to blocking.
+
+        `_parse_junit_timestamp` now uses `datetime.fromisoformat`. This also
+        means `/import` accepts uploads it used to reject with
+        "Failed to import testrun".
         """
         junit_file = _write(
             tmp_path, _suite(_case("test_a"), timestamp="2026-08-05T01:00:00.000000+01:00")
         )
-        with pytest.raises(ValueError, match="unconverted data remains"):
+        data = junittools.get_testsuite_data(junit_file=junit_file)
+        assert data.timestamp == datetime(2026, 8, 5, 0, 0, 0, tzinfo=UTC)
+
+    def test_a_whole_second_timestamp_is_handled(self, tmp_path: Path) -> None:
+        """Pytest omits `.%f` when the microsecond is zero, via isoformat()."""
+        junit_file = _write(
+            tmp_path, _suite(_case("test_a"), timestamp="2026-08-05T01:00:00+00:00")
+        )
+        data = junittools.get_testsuite_data(junit_file=junit_file)
+        assert data.timestamp == datetime(2026, 8, 5, 1, 0, 0, tzinfo=UTC)
+
+    @pytest.mark.parametrize(
+        "bad", ["0001-01-01T00:00:00+23:59", "9999-12-31T23:59:59.999999-23:59"]
+    )
+    def test_an_out_of_range_timestamp_raises_value_error(self, tmp_path: Path, bad: str) -> None:
+        """`fromisoformat` accepts +/-24h offsets, so a year at either end overflows.
+
+        It must surface as ValueError, which is what `/import` catches to
+        answer 400. As OverflowError it escapes as an unhandled 500 with an
+        HTML body, breaking the JSON-error contract. The fixed format this
+        replaced raised ValueError for the same input.
+        """
+        junit_file = _write(tmp_path, _suite(_case("test_a"), timestamp=bad))
+
+        with pytest.raises(ValueError, match="out of range"):
             junittools.get_testsuite_data(junit_file=junit_file)
+
+    def test_a_real_pytest_report_from_a_non_utc_machine_is_accepted(self, tmp_path: Path) -> None:
+        """The exact shape a local run in BST produces, which used to be rejected."""
+        junit_file = _write(
+            tmp_path, _suite(_case("test_a"), timestamp="2026-05-31T00:39:35.624341+01:00")
+        )
+
+        data = junittools.get_testsuite_data(junit_file=junit_file)
+
+        assert data.timestamp == datetime(2026, 5, 30, 23, 39, 35, 624341, tzinfo=UTC)
 
     def test_missing_timestamp_falls_back_to_the_epoch(self, tmp_path: Path) -> None:
         content = _suite(_case("test_a")).replace(b' timestamp="2026-08-05T01:00:00.000000"', b"")

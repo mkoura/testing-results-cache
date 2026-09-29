@@ -30,6 +30,51 @@ def _get_xml_root(junit_file: Path) -> etree._Element:
     return root
 
 
+def _parse_junit_timestamp(value: str) -> datetime:
+    """Parse a JUnit `<testsuite timestamp=...>` value into tz-aware UTC.
+
+    `datetime.fromisoformat`, not a fixed `strptime` format. The previous
+    fixed format accepted exactly one shape, `...%f+00:00`, and raised on
+    two that pytest really emits:
+
+    * a non-UTC offset, e.g. `+01:00`, which is what every run on a machine
+      not set to UTC produces. CI runners are UTC, so this never surfaced
+      while CI was the only caller.
+    * a whole-second timestamp, which pytest writes without the `.%f` part
+      because it calls `datetime.isoformat()`.
+
+    Both reached `import_results` as a ValueError and were reported to the
+    client as "Failed to import testrun".
+
+    A value with no offset at all is read as UTC, which is what the old code
+    did after stripping `+00:00`.
+
+    Args:
+        value: The `timestamp` attribute of the `<testsuite>` element.
+
+    Returns:
+        The timestamp as tz-aware UTC.
+
+    Raises:
+        ValueError: When the value is not a usable ISO-8601 timestamp.
+    """
+    try:
+        parsed = datetime.fromisoformat(value)
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=UTC)
+        return parsed.astimezone(UTC)
+    except OverflowError as exc:
+        # `fromisoformat` accepts offsets up to +/-24h, so a year at either
+        # end of the range converts out of `datetime`'s range in
+        # `astimezone`. Re-raised as ValueError because that is what the
+        # import route catches to answer 400; left as OverflowError it
+        # escapes as an unhandled 500 with an HTML body. The old fixed
+        # format raised ValueError for the same input, so this keeps the
+        # caller's contract unchanged.
+        err = f"Timestamp out of range: {value!r}"
+        raise ValueError(err) from exc
+
+
 def _get_verdict(testcase_record: etree._Element) -> str:
     """Parse testcase record and return it's info."""
     verdict = None
@@ -82,8 +127,7 @@ def get_testsuite_data(junit_file: Path) -> common.TestsuiteData:
 
     testsuite = testsuites[0]
     testcases_data = _get_testcases_data(testsuite=testsuite)
-    timestamp_str = testsuite.get("timestamp", "1970-01-01T00:00:00.000000").replace("+00:00", "")
-    timestamp = datetime.strptime(timestamp_str, "%Y-%m-%dT%H:%M:%S.%f").replace(tzinfo=UTC)
+    timestamp = _parse_junit_timestamp(testsuite.get("timestamp", "1970-01-01T00:00:00.000000"))
     testsuite_data = common.TestsuiteData(timestamp=timestamp, tests_verdicts=testcases_data)
 
     return testsuite_data
