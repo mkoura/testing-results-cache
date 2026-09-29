@@ -26,11 +26,9 @@ CI secrets, and export it locally. Nothing here needs a second auth path.
 import json
 import math
 import sqlite3
+import typing as tp
 from datetime import UTC
 from datetime import datetime
-from typing import List
-from typing import NoReturn
-from typing import Optional
 
 import flask
 from werkzeug.exceptions import HTTPException
@@ -78,6 +76,12 @@ stats = flask.Blueprint("stats", __name__)
 
 
 def _rollback(conn: sqlite3.Connection, run_id: str) -> None:
+    """Undo an uncommitted write, without masking the error that caused it.
+
+    Args:
+        conn: The connection whose transaction should be rolled back.
+        run_id: The run being uploaded, for the log line.
+    """
     try:
         conn.rollback()
     except sqlite3.Error:
@@ -86,12 +90,28 @@ def _rollback(conn: sqlite3.Connection, run_id: str) -> None:
         )
 
 
-def _abort_storage_failure(run_id: str) -> NoReturn:
+def _abort_storage_failure(run_id: str) -> tp.NoReturn:
+    """Log a failed write and answer 500 in JSON.
+
+    Args:
+        run_id: The run being uploaded.
+
+    Raises:
+        HTTPException: Always, carrying a JSON 500 body.
+    """
     flask.current_app.logger.exception(f"Failed to store testrun stats for run {run_id}")
     common.abort_json(500, "Failed to store testrun stats")
 
 
-def _abort_read_failure(context: str) -> NoReturn:
+def _abort_read_failure(context: str) -> tp.NoReturn:
+    """Log a failed read and answer 500 in JSON.
+
+    Args:
+        context: Which read failed, for the log line.
+
+    Raises:
+        HTTPException: Always, carrying a JSON 500 body.
+    """
     # Only DB errors land here. Without it an unrun migration would surface
     # as an unhandled exception and break the JSON-error contract the rest
     # of this service keeps - the same gap that was fixed on the
@@ -100,14 +120,31 @@ def _abort_read_failure(context: str) -> NoReturn:
     common.abort_json(500, "Failed to read testrun stats")
 
 
-def _reject_json_constant(name: str) -> NoReturn:
-    """Refuse NaN and Infinity, which json.loads accepts but JSON does not."""
+def _reject_json_constant(name: str) -> tp.NoReturn:
+    """Refuse NaN and Infinity, which json.loads accepts but JSON does not.
+
+    Args:
+        name: The literal the parser found.
+
+    Raises:
+        ValueError: Always. `_body` turns it into a 400.
+    """
     err = f"{name} is not valid JSON"
     raise ValueError(err)
 
 
 def _finite_float(raw: str) -> float:
-    """Refuse a numeric literal that overflows to infinity, such as `1e400`."""
+    """Refuse a numeric literal that overflows to infinity, such as `1e400`.
+
+    Args:
+        raw: The numeric literal as it appeared in the document.
+
+    Returns:
+        The parsed value, when it is finite.
+
+    Raises:
+        ValueError: When the literal overflows. `_body` turns it into a 400.
+    """
     value = float(raw)
     if not math.isfinite(value):
         err = f"{raw} is not a finite number"
@@ -118,8 +155,12 @@ def _finite_float(raw: str) -> float:
 def _body() -> dict:
     """Return the request body as a JSON object, or refuse it.
 
-    `silent=True` because the default raises a 400 with an HTML body, which
-    would break the JSON-error contract every other response here keeps.
+    Returns:
+        The parsed document, with a `schema` this service understands.
+
+    Raises:
+        HTTPException: 413 when the body is over MAX_PAYLOAD_BYTES, or 400
+            when it is not a JSON object or carries an unknown `schema`.
     """
     # Read the body once and parse that same buffer. `get_data(cache=False)`
     # followed by `get_json()` would hand the parser an already-consumed
@@ -151,12 +192,24 @@ def _body() -> dict:
     return payload
 
 
-def _required_segment(payload: dict, name: str, default: Optional[str] = None) -> str:
+def _required_segment(payload: dict, name: str, default: tp.Optional[str] = None) -> str:
     """Read one identity field and check it is usable as a URL segment.
 
     The read routes address a run by these values, so anything that would
     not survive a path segment is refused at write time rather than becoming
     a row nothing can reach.
+
+    Args:
+        payload: The uploaded document.
+        name: The field to read.
+        default: Used when the field is absent or explicitly null.
+
+    Returns:
+        The field's value.
+
+    Raises:
+        HTTPException: 400 when the field is missing, not a string, or not a
+            usable path segment.
     """
     # `None` is treated as absent, not as a bad value: a client that
     # serialises an unset optional field as `null` means the same thing as
@@ -173,6 +226,21 @@ def _required_segment(payload: dict, name: str, default: Optional[str] = None) -
 def _non_negative_int(
     payload: dict, name: str, container: str = "", maximum: int = MAX_COUNT
 ) -> int:
+    """Read one count and check it is a bounded, non-negative integer.
+
+    Args:
+        payload: The object holding the field.
+        name: The field to read.
+        container: The parent field's name, for the error message.
+        maximum: The largest value accepted.
+
+    Returns:
+        The field's value.
+
+    Raises:
+        HTTPException: 400 when the value is not an integer, is negative, or
+            exceeds `maximum`.
+    """
     value = payload.get(name)
     where = f"{container}.{name}" if container else name
     # `isinstance(True, int)` is True, so bools are excluded explicitly -
@@ -190,6 +258,16 @@ def _counts(payload: dict) -> dict:
     The four status buckets must not exceed the total. They may sum to less:
     anything the client saw with another status is the remainder, exposed as
     `other` on the entry rather than stored in its own column.
+
+    Args:
+        payload: The uploaded document.
+
+    Returns:
+        The five counts, keyed by name.
+
+    Raises:
+        HTTPException: 400 when the block is missing, a count is invalid, or
+            the buckets exceed the total.
     """
     block = payload.get("counts")
     if not isinstance(block, dict):
@@ -211,6 +289,17 @@ def _never_run(payload: dict, skipped: int) -> int:
     A registration-pass result carries status "skipped", so a `never_run`
     above `skipped` means the client counted something inconsistently and
     the row would misreport how complete the run was.
+
+    Args:
+        payload: The uploaded document.
+        skipped: The already-validated `counts.skipped`.
+
+    Returns:
+        The number of tests that never produced a real result.
+
+    Raises:
+        HTTPException: 400 when `quality` is missing or not an object, or
+            when the value exceeds `skipped`.
     """
     # Not `payload.get("quality") or {}`: that turns a falsy non-dict such as
     # `[]` into `{}` and the type error below is never reported, so the caller
@@ -230,6 +319,18 @@ def _never_run(payload: dict, skipped: int) -> int:
 
 
 def _duration(payload: dict) -> float:
+    """Read the run's wall-clock duration in seconds.
+
+    Args:
+        payload: The uploaded document.
+
+    Returns:
+        The duration, guaranteed finite and non-negative.
+
+    Raises:
+        HTTPException: 400 when the value is not a finite, non-negative
+            number.
+    """
     value = payload.get("duration")
     if isinstance(value, bool) or not isinstance(value, int | float) or value < 0:
         common.abort_json(400, "Field 'duration' must be a non-negative number")
@@ -243,6 +344,17 @@ def _duration(payload: dict) -> float:
 
 
 def _exit_code(payload: dict) -> int:
+    """Read pytest's own exit code for the run.
+
+    Args:
+        payload: The uploaded document.
+
+    Returns:
+        The exit code.
+
+    Raises:
+        HTTPException: 400 when it is not an integer, or is out of range.
+    """
     value = payload.get("exit_code")
     if isinstance(value, bool) or not isinstance(value, int):
         common.abort_json(400, "Field 'exit_code' must be an integer")
@@ -258,6 +370,16 @@ def _timestamp(payload: dict) -> datetime:
     A naive timestamp is treated as UTC rather than refused: the stored
     column is UTC by definition, and rejecting a run over a missing offset
     would lose real data for a formatting detail.
+
+    Args:
+        payload: The uploaded document.
+
+    Returns:
+        The timestamp as tz-aware UTC, known to survive storage.
+
+    Raises:
+        HTTPException: 400 when the value is not an ISO-8601 string, cannot
+            be converted to UTC, or could not be read back once stored.
     """
     value = payload.get("timestamp")
     if not isinstance(value, str):
@@ -287,13 +409,32 @@ def _timestamp(payload: dict) -> datetime:
 
 
 def _filtered(payload: dict) -> bool:
+    """Read whether the run covered only a subset of the tests.
+
+    Args:
+        payload: The uploaded document.
+
+    Returns:
+        True when the run was restricted, defaulting to False.
+
+    Raises:
+        HTTPException: 400 when the value is not a boolean.
+    """
     value = payload.get("filtered", False)
     if not isinstance(value, bool):
         common.abort_json(400, "Field 'filtered' must be a boolean")
     return value
 
 
-def _parse_days() -> Optional[int]:
+def _parse_days() -> tp.Optional[int]:
+    """Read the optional `days` query parameter.
+
+    Returns:
+        The window in days, or None when the caller did not ask for one.
+
+    Raises:
+        HTTPException: 400 when it is not an integer between 1 and MAX_DAYS.
+    """
     raw = flask.request.args.get("days")
     if raw is None:
         return None
@@ -307,6 +448,14 @@ def _parse_days() -> Optional[int]:
 
 
 def _parse_limit() -> int:
+    """Read the optional `limit` query parameter.
+
+    Returns:
+        The maximum rows to return, defaulting to the cap.
+
+    Raises:
+        HTTPException: 400 when it is not an integer within the cap.
+    """
     raw = flask.request.args.get("limit")
     if raw is None:
         return stats_cache.MAX_LIST_ROWS
@@ -324,7 +473,15 @@ def _parse_limit() -> int:
     return limit
 
 
-def _parse_project_arg() -> Optional[str]:
+def _parse_project_arg() -> tp.Optional[str]:
+    """Read the optional `project` query parameter.
+
+    Returns:
+        The project to filter on, or None for every project.
+
+    Raises:
+        HTTPException: 400 when the value is not a usable path segment.
+    """
     value = flask.request.args.get("project")
     if value is None:
         return None
@@ -336,6 +493,17 @@ def _parse_project_arg() -> Optional[str]:
 
 
 def _entry_dict(entry: common.TestrunStatsEntry) -> dict:
+    """Render one run for the listing route.
+
+    The stored document is deliberately left out, so a summary page built on
+    this route cannot leak test names or failure text.
+
+    Args:
+        entry: The run as read back from the database.
+
+    Returns:
+        The run's summary fields, including the derived `other`.
+    """
     return {
         "project": entry.project,
         "testrun_name": entry.testrun_name,
@@ -364,6 +532,13 @@ def upload_stats() -> dict:
     The whole identity comes from the body rather than the URL. Splitting a
     five-part identity between path segments and JSON would let the two
     disagree, and there is no sensible answer for which one wins.
+
+    Returns:
+        The five identity fields of the run that was stored.
+
+    Raises:
+        HTTPException: 400 or 413 when the document is refused, 503 when the
+            database is busy, or 500 when the write fails.
     """
     payload = _body()
 
@@ -431,7 +606,15 @@ def upload_stats() -> dict:
 @stats.route("/stats", methods=["GET"])
 @flask_auth.auth.login_required
 def get_totals() -> dict:
-    """Sum the counts across runs, optionally narrowed by project and day window."""
+    """Sum the counts across runs, optionally narrowed by project and day window.
+
+    Returns:
+        The summed counts, echoing back the filters that were applied.
+
+    Raises:
+        HTTPException: 400 when a query parameter is invalid, or 500 when the
+            read fails.
+    """
     project = _parse_project_arg()
     days = _parse_days()
 
@@ -457,8 +640,16 @@ def get_totals() -> dict:
 
 @stats.route("/stats/runs", methods=["GET"])
 @flask_auth.auth.login_required
-def list_runs() -> List[dict]:
-    """List individual runs, newest first."""
+def list_runs() -> tp.List[dict]:
+    """List individual runs, newest first.
+
+    Returns:
+        One summary object per run, oldest dropped once `limit` is reached.
+
+    Raises:
+        HTTPException: 400 when a query parameter is invalid, or 500 when the
+            read fails.
+    """
     project = _parse_project_arg()
     days = _parse_days()
     limit = _parse_limit()

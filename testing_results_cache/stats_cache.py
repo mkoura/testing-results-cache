@@ -16,11 +16,10 @@ test script and may legitimately be retried.
 
 import logging
 import sqlite3
+import typing as tp
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
-from typing import List
-from typing import Optional
 
 from testing_results_cache import common
 
@@ -38,10 +37,29 @@ MAX_LIST_ROWS = 1000
 
 
 def _format_timestamp(value: datetime) -> str:
+    """Render a datetime in the column's storage format.
+
+    Args:
+        value: A tz-aware UTC datetime.
+
+    Returns:
+        The value in TIMESTAMP_FORMAT.
+    """
     return value.strftime(TIMESTAMP_FORMAT)
 
 
 def _parse_timestamp(value: str) -> datetime:
+    """Read a stored timestamp back as tz-aware UTC.
+
+    Args:
+        value: A string in TIMESTAMP_FORMAT.
+
+    Returns:
+        The parsed datetime, with UTC attached.
+
+    Raises:
+        ValueError: When the value is not in TIMESTAMP_FORMAT.
+    """
     return datetime.strptime(value, TIMESTAMP_FORMAT).replace(tzinfo=UTC)
 
 
@@ -54,6 +72,12 @@ def timestamp_round_trips(value: datetime) -> bool:
     formats to something that can never be parsed again. Checked by doing the
     round trip rather than by testing the year, so this stays correct if
     TIMESTAMP_FORMAT changes.
+
+    Args:
+        value: The tz-aware UTC timestamp a client sent.
+
+    Returns:
+        True when the value survives being formatted and parsed again.
     """
     try:
         return _parse_timestamp(_format_timestamp(value)) == value
@@ -74,6 +98,11 @@ def save_testrun_stats(
     There is no file to put in place here, so the caller commits straight
     after, but keeping the split means the API layer decides what a failure
     rolls back.
+
+    Args:
+        conn: An open database connection.
+        entry: The run's identity, counts and stored document.
+        user_id: The authenticated uploader.
     """
     cur = conn.cursor()
     cur.execute(
@@ -111,16 +140,23 @@ def save_testrun_stats(
     )
 
 
-def _window_clause(project: Optional[str], days: Optional[int]) -> tuple:
+def _window_clause(project: tp.Optional[str], days: tp.Optional[int]) -> tuple:
     """Build the shared WHERE clause for the two read paths.
 
     Interrupted runs (`never_run > 0`) are deliberately NOT excluded here.
     They are real runs and hiding them would understate the work done; the
     column is exposed instead so a caller can decide. See the note on
     `never_run` in common.TestrunStatsEntry.
+
+    Args:
+        project: Limit to one project, or None for every project.
+        days: Limit to runs this recent, or None for no time limit.
+
+    Returns:
+        Tuple of (WHERE clause including its leading space, bind parameters).
     """
     clauses = []
-    params: List = []
+    params: tp.List = []
     if project:
         clauses.append("project = ?")
         params.append(project)
@@ -141,9 +177,18 @@ def _window_clause(project: Optional[str], days: Optional[int]) -> tuple:
 
 
 def get_totals(
-    conn: sqlite3.Connection, project: Optional[str] = None, days: Optional[int] = None
+    conn: sqlite3.Connection, project: tp.Optional[str] = None, days: tp.Optional[int] = None
 ) -> common.TestrunStatsTotals:
-    """Sum the counts across every matching run."""
+    """Sum the counts across every matching run.
+
+    Args:
+        conn: An open database connection.
+        project: Limit to one project, or None for every project.
+        days: Limit to runs this recent, or None for no time limit.
+
+    Returns:
+        The summed counts, with `runs` holding how many rows were summed.
+    """
     where, params = _window_clause(project, days)
     cur = conn.cursor()
     cur.execute(
@@ -169,10 +214,10 @@ def get_totals(
 
 def list_testrun_stats(
     conn: sqlite3.Connection,
-    project: Optional[str] = None,
-    days: Optional[int] = None,
+    project: tp.Optional[str] = None,
+    days: tp.Optional[int] = None,
     limit: int = MAX_LIST_ROWS,
-) -> List[common.TestrunStatsEntry]:
+) -> tp.List[common.TestrunStatsEntry]:
     """List matching runs, newest first.
 
     A row with an unparseable timestamp is skipped rather than failing the
