@@ -310,9 +310,13 @@ Notes on the fields:
   `step2`, `step3`.
 - `timestamp` is ISO-8601. A value without an offset is read as UTC. Years
   before 1000 are refused, because the stored format cannot read them back.
-- `duration` must be finite. `NaN` and `Infinity` are refused, including the
-  bare JSON literals, which most JSON parsers emit but the format does not
-  allow.
+- Each count is capped at 10,000,000, which is about 4600x the largest real
+  run. The cap is not about one upload: the counts are summed across rows, and
+  a per-field bound alone would let two individually legal rows overflow
+  `SUM()` and break every read permanently.
+- No number anywhere in the document may be non-finite. `NaN`, `Infinity` and
+  `-Infinity` are refused, and so is a literal like `1e400` that overflows to
+  infinity. Python's JSON parser accepts all of them; the format does not.
 - Anything else in the document is stored and handed back only by the
   database, not by the read routes. That is where `versions` and `commands`
   live until a query needs them as columns. The stored document is

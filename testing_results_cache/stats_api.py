@@ -63,6 +63,15 @@ MAX_DAYS = 366
 # inside the driver, which would surface as a 500 for what is a client error.
 MAX_SQLITE_INT = 2**63 - 1
 
+# Counts are capped far below MAX_SQLITE_INT, because they are SUMmed across
+# rows by `get_totals` and a per-field bound does not stop the total
+# overflowing. Two rows of 2**62 are each individually legal and make every
+# `GET /stats` variant fail with `integer overflow` for good - there is no
+# delete route, so recovery means manual SQL on the live database. Ten million
+# tests in one run is about 4600x the largest real run measured (2145), so
+# this cannot reject a genuine upload, and 2**63 / 10**7 is 9.2e11 rows.
+MAX_COUNT = 10_000_000
+
 _COUNT_FIELDS = ("total", "passed", "failed", "broken", "skipped")
 
 stats = flask.Blueprint("stats", __name__)
@@ -97,6 +106,15 @@ def _reject_json_constant(name: str) -> NoReturn:
     raise ValueError(err)
 
 
+def _finite_float(raw: str) -> float:
+    """Refuse a numeric literal that overflows to infinity, such as `1e400`."""
+    value = float(raw)
+    if not math.isfinite(value):
+        err = f"{raw} is not a finite number"
+        raise ValueError(err)
+    return value
+
+
 def _body() -> dict:
     """Return the request body as a JSON object, or refuse it.
 
@@ -112,12 +130,15 @@ def _body() -> dict:
         common.abort_json(413, f"Payload larger than {MAX_PAYLOAD_BYTES} bytes")
 
     try:
-        # parse_constant fires for the `NaN`, `Infinity` and `-Infinity`
+        # Two hooks, because there are two ways to get a non-finite float in.
+        # `parse_constant` fires for the `NaN`, `Infinity` and `-Infinity`
         # literals, which json.loads accepts by default and json.dumps emits
-        # back. They are not valid JSON, so a single upload carrying one
-        # would make `GET /stats` unparseable for every caller from then on
-        # (SUM propagates a non-finite float across every row).
-        payload = json.loads(raw, parse_constant=_reject_json_constant)
+        # back. `parse_float` catches the other route: `1e400` is an ordinary
+        # numeric literal that overflows to `inf` without the constant hook
+        # ever running. Either one is not valid JSON, and either one in the
+        # stored document breaks the promise that `payload` always holds
+        # readable JSON - which is the whole reason that column exists.
+        payload = json.loads(raw, parse_constant=_reject_json_constant, parse_float=_finite_float)
     except (ValueError, UnicodeDecodeError):
         common.abort_json(400, "Body is not valid JSON")
     if not isinstance(payload, dict):
@@ -149,15 +170,17 @@ def _required_segment(payload: dict, name: str, default: Optional[str] = None) -
     return value
 
 
-def _non_negative_int(payload: dict, name: str, container: str = "") -> int:
+def _non_negative_int(
+    payload: dict, name: str, container: str = "", maximum: int = MAX_COUNT
+) -> int:
     value = payload.get(name)
     where = f"{container}.{name}" if container else name
     # `isinstance(True, int)` is True, so bools are excluded explicitly -
     # otherwise `"passed": true` would silently store 1.
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         common.abort_json(400, f"Field {where!r} must be a non-negative integer")
-    if value > MAX_SQLITE_INT:
-        common.abort_json(400, f"Field {where!r} is larger than {MAX_SQLITE_INT}")
+    if value > maximum:
+        common.abort_json(400, f"Field {where!r} is larger than {maximum}")
     return value
 
 
@@ -223,6 +246,7 @@ def _exit_code(payload: dict) -> int:
     value = payload.get("exit_code")
     if isinstance(value, bool) or not isinstance(value, int):
         common.abort_json(400, "Field 'exit_code' must be an integer")
+    # MAX_SQLITE_INT, not MAX_COUNT: this column is stored, never summed.
     if not -MAX_SQLITE_INT <= value <= MAX_SQLITE_INT:
         common.abort_json(400, "Field 'exit_code' is out of range")
     return value

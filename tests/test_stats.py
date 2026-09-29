@@ -413,18 +413,84 @@ class TestValidation:
             == http.HTTPStatus.BAD_REQUEST
         )
 
-    def test_rejects_a_count_too_large_for_sqlite(
+    def test_rejects_a_count_above_the_cap(
         self, app: flask.Flask, client: flask.testing.FlaskClient, auth_headers: dict
     ) -> None:
         """An unbounded JSON integer would raise OverflowError inside the driver."""
-        huge = stats_api.MAX_SQLITE_INT + 1
-        counts = {**VALID_PAYLOAD["counts"], "total": huge}
+        counts = {**VALID_PAYLOAD["counts"], "total": stats_api.MAX_COUNT + 1}
 
         response = _put(client, auth_headers, _payload(counts=counts))
 
         assert response.status_code == http.HTTPStatus.BAD_REQUEST
         assert "larger than" in response.json["message"]
         assert _row_count(app) == 0
+
+    def test_counts_cannot_overflow_the_sum_across_rows(
+        self, client: flask.testing.FlaskClient, auth_headers: dict
+    ) -> None:
+        """A per-field bound alone does not stop SUM() overflowing.
+
+        Two rows of 2**62 are each individually under the sqlite integer
+        limit, but their sum is not, and `SUM(cases)` then raises
+        `integer overflow` - breaking every GET /stats variant permanently,
+        with no delete route to recover.
+        """
+        counts = {**VALID_PAYLOAD["counts"], "total": 2**62}
+        for run_id in ("a", "b"):
+            response = _put(client, auth_headers, _payload(run_id=run_id, counts=counts))
+            assert response.status_code == http.HTTPStatus.BAD_REQUEST
+
+        assert client.get("/stats", headers=auth_headers).status_code == http.HTTPStatus.OK
+
+    def test_the_largest_allowed_counts_still_sum(
+        self, client: flask.testing.FlaskClient, auth_headers: dict
+    ) -> None:
+        """The cap has to leave room for a realistic number of runs."""
+        counts = {
+            "total": stats_api.MAX_COUNT,
+            "passed": stats_api.MAX_COUNT,
+            "failed": 0,
+            "broken": 0,
+            "skipped": 0,
+        }
+        for run_id in RUN_IDS:
+            _ok(client, auth_headers, _payload(run_id=run_id, counts=counts))
+
+        totals = client.get("/stats", headers=auth_headers).json
+        assert totals["cases"] == stats_api.MAX_COUNT * len(RUN_IDS)
+
+    @pytest.mark.parametrize("literal", ["1e400", "-1e400"])
+    def test_rejects_a_numeric_literal_that_overflows_to_infinity(
+        self, app: flask.Flask, client: flask.testing.FlaskClient, auth_headers: dict, literal: str
+    ) -> None:
+        """`1e400` is an ordinary number literal, so parse_constant never fires.
+
+        Left through, it reaches the stored payload as the token `Infinity`,
+        which breaks the promise that the column always holds readable JSON -
+        the whole reason the column exists.
+        """
+        body = json.dumps(VALID_PAYLOAD).replace('"cardano_node": "10.5.0"', f'"x": {literal}')
+
+        response = _put(client, auth_headers, body)
+
+        assert response.status_code == http.HTTPStatus.BAD_REQUEST
+        assert _row_count(app) == 0
+
+    def test_the_stored_payload_is_always_readable_json(
+        self, app: flask.Flask, client: flask.testing.FlaskClient, auth_headers: dict
+    ) -> None:
+        """No accepted upload may leave a non-finite value in the column."""
+        _ok(client, auth_headers, VALID_PAYLOAD)
+
+        with app.app_context():
+            conn = flask_db.get_db()
+            stored = conn.execute("SELECT payload FROM testrun_stats").fetchone()[0]
+
+        def _no_constants(name: str) -> float:
+            msg = f"non-finite {name} in stored payload"
+            raise AssertionError(msg)
+
+        json.loads(stored, parse_constant=_no_constants)
 
     def test_rejects_a_missing_counts_block(
         self, client: flask.testing.FlaskClient, auth_headers: dict
