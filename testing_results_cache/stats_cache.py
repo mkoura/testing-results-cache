@@ -140,7 +140,7 @@ def save_testrun_stats(
     )
 
 
-def _window_clause(project: tp.Optional[str], days: tp.Optional[int]) -> tuple:
+def _window_clause(project: tp.Optional[str], days: tp.Optional[int]) -> tp.Tuple[str, tp.List]:
     """Build the shared WHERE clause for the two read paths.
 
     Interrupted runs (`never_run > 0`) are deliberately NOT excluded here.
@@ -224,16 +224,33 @@ def list_testrun_stats(
     whole listing, matching sync_results_cache.list_sync_results - one bad
     row should not hide every other run from a caller with nothing to do
     with it. It is still logged so an operator can find it.
+
+    Args:
+        conn: An open database connection.
+        project: Limit to one project, or None for every project.
+        days: Limit to runs this recent, or None for no time limit.
+        limit: Maximum rows to return. Values above MAX_LIST_ROWS are
+            clamped here; the API layer refuses them outright instead.
+
+    Returns:
+        Up to `limit` runs, newest first, minus any row whose stored
+        timestamp could not be parsed.
     """
     where, params = _window_clause(project, days)
     capped = max(1, min(limit, MAX_LIST_ROWS))
+    # Fetched up to the hard cap and trimmed to `capped` only after the
+    # unparseable rows are dropped. Applying the caller's limit in SQL would
+    # let a single bad row inside the window shorten the answer - at
+    # `limit=1`, one bad row returns an empty list while good rows sit right
+    # behind it. The work stays bounded, because MAX_LIST_ROWS is the same
+    # ceiling the SQL had before.
     cur = conn.cursor()
     cur.execute(
         "SELECT project, testrun_name, run_id, step, origin, timestamp, "
         "cases, passed, failed, broken, skipped, never_run, duration, "
         "exit_code, filtered, payload "
         f"FROM testrun_stats{where} ORDER BY timestamp DESC LIMIT ?",
-        [*params, capped],
+        [*params, MAX_LIST_ROWS],
     )
     entries = []
     for row in cur.fetchall():
@@ -265,4 +282,6 @@ def list_testrun_stats(
                 payload=row[15],
             )
         )
+        if len(entries) == capped:
+            break
     return entries

@@ -70,6 +70,16 @@ MAX_SQLITE_INT = 2**63 - 1
 # this cannot reject a genuine upload, and 2**63 / 10**7 is 9.2e11 rows.
 MAX_COUNT = 10_000_000
 
+# `duration` needs a bound for the same reason `cases` does, and it was
+# missed when MAX_COUNT was added: `get_totals` sums this column too. A float
+# sum does not raise on overflow the way an integer one does - it quietly
+# becomes `inf`, and `flask.jsonify` then emits the bare token `Infinity`,
+# which is not valid JSON. That is the exact failure the parse hooks in
+# `_body` exist to prevent on the way in. A billion seconds is about 31
+# years, against a real run of 4527 seconds, and it leaves room for 1.8e299
+# rows before a sum could reach infinity.
+MAX_DURATION = 10**9
+
 _COUNT_FIELDS = ("total", "passed", "failed", "broken", "skipped")
 
 stats = flask.Blueprint("stats", __name__)
@@ -329,7 +339,7 @@ def _duration(payload: dict) -> float:
 
     Raises:
         HTTPException: 400 when the value is not a finite, non-negative
-            number.
+            number, or is above MAX_DURATION.
     """
     value = payload.get("duration")
     if isinstance(value, bool) or not isinstance(value, int | float) or value < 0:
@@ -340,6 +350,8 @@ def _duration(payload: dict) -> float:
     # caller, and NaN reaches sqlite as NULL against a NOT NULL column.
     if not math.isfinite(value):
         common.abort_json(400, "Field 'duration' must be a finite number")
+    if value > MAX_DURATION:
+        common.abort_json(400, f"Field 'duration' is larger than {MAX_DURATION}")
     return float(value)
 
 
@@ -566,10 +578,17 @@ def upload_stats() -> dict:
         exit_code=_exit_code(payload),
         filtered=_filtered(payload),
         # Re-serialised from the parsed object, not stored byte for byte: the
-        # values all survive, but key order, whitespace, non-ASCII escaping
-        # and any duplicate keys do not. That is deliberate - what lands in
-        # the column is then always valid, canonical JSON of a known size.
-        payload=json.dumps(payload, separators=(",", ":"), sort_keys=True),
+        # values all survive, but key order, whitespace and any duplicate
+        # keys do not. That is deliberate - what lands in the column is then
+        # always valid, canonical JSON.
+        #
+        # `ensure_ascii=False` matters for the size, not for looks. The
+        # default escapes every non-ASCII character to `\uXXXX`, which
+        # measures 3.0x for 4-byte emoji and 2.0x for 3-byte CJK - so a body
+        # inside MAX_PAYLOAD_BYTES could still store three times that. Left
+        # as UTF-8, the stored form is never larger than the request that
+        # carried it.
+        payload=json.dumps(payload, separators=(",", ":"), sort_keys=True, ensure_ascii=False),
     )
 
     conn = flask_db.get_db()
@@ -624,6 +643,18 @@ def get_totals() -> dict:
     except sqlite3.Error:
         _abort_read_failure("totals")
 
+    # MAX_DURATION makes this unreachable through this API, but a row written
+    # by any other means could still push the sum to infinity, and emitting it
+    # would return a body no strict JSON reader can parse. An integer overflow
+    # already surfaces here as a JSON 500 from the sqlite3.Error above; this
+    # gives the float column the same behaviour instead of silent corruption.
+    if not math.isfinite(totals.duration):
+        flask.current_app.logger.error(
+            "SUM(duration) is not finite - a stored row is out of range "
+            f"(project={project!r}, days={days!r})"
+        )
+        common.abort_json(500, "Failed to read testrun stats")
+
     return {
         "runs": totals.runs,
         "cases": totals.cases,
@@ -631,6 +662,7 @@ def get_totals() -> dict:
         "failed": totals.failed,
         "broken": totals.broken,
         "skipped": totals.skipped,
+        "other": totals.other,
         "never_run": totals.never_run,
         "duration": totals.duration,
         "project": project,

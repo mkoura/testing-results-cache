@@ -506,6 +506,25 @@ class TestValidation:
         assert response.status_code == http.HTTPStatus.BAD_REQUEST
         assert _row_count(app) == 0
 
+    def test_a_non_ascii_payload_round_trips(
+        self, app: flask.Flask, client: flask.testing.FlaskClient, auth_headers: dict
+    ) -> None:
+        """Store non-ASCII values unchanged, and without inflating the column.
+
+        The column is written with `ensure_ascii=False`. With the default,
+        every non-ASCII character becomes a six-byte unicode escape, so a
+        body inside MAX_PAYLOAD_BYTES could still store three times that.
+        """
+        text = "cardano \u4e2d\u6587 \U0001f600 caf\u00e9"
+        _ok(client, auth_headers, _payload(note=text))
+
+        with app.app_context():
+            conn = flask_db.get_db()
+            stored = conn.execute("SELECT payload FROM testrun_stats").fetchone()[0]
+
+        assert json.loads(stored)["note"] == text
+        assert len(stored.encode()) <= stats_api.MAX_PAYLOAD_BYTES
+
     def test_the_stored_payload_is_always_readable_json(
         self, app: flask.Flask, client: flask.testing.FlaskClient, auth_headers: dict
     ) -> None:
@@ -576,6 +595,52 @@ class TestValidation:
             _put(client, auth_headers, _payload(duration=bad)).status_code
             == http.HTTPStatus.BAD_REQUEST
         )
+
+    def test_rejects_a_duration_above_the_cap(
+        self, app: flask.Flask, client: flask.testing.FlaskClient, auth_headers: dict
+    ) -> None:
+        """Refuse a duration large enough to overflow the sum across rows."""
+        response = _put(client, auth_headers, _payload(duration=stats_api.MAX_DURATION + 1))
+
+        assert response.status_code == http.HTTPStatus.BAD_REQUEST
+        assert "larger than" in response.json["message"]
+        assert _row_count(app) == 0
+
+    def test_duration_cannot_overflow_the_sum_across_rows(
+        self, client: flask.testing.FlaskClient, auth_headers: dict
+    ) -> None:
+        """Keep the totals parseable however many large durations are stored.
+
+        A float sum does not raise on overflow the way an integer one does.
+        It becomes `inf`, and the response then carries the bare token
+        `Infinity`, which is not valid JSON - the same failure the parse
+        hooks refuse on the way in.
+        """
+        for run_id in ("a", "b"):
+            response = _put(client, auth_headers, _payload(run_id=run_id, duration=1e308))
+            assert response.status_code == http.HTTPStatus.BAD_REQUEST
+
+        body = client.get("/stats", headers=auth_headers)
+
+        def _no_constants(name: str) -> float:
+            msg = f"non-finite {name} in response"
+            raise AssertionError(msg)
+
+        json.loads(body.data, parse_constant=_no_constants)
+
+    def test_the_largest_allowed_durations_still_sum(
+        self, client: flask.testing.FlaskClient, auth_headers: dict
+    ) -> None:
+        """The duration cap has to leave room for a realistic number of runs."""
+        for run_id in RUN_IDS:
+            _ok(
+                client,
+                auth_headers,
+                _payload(run_id=run_id, duration=float(stats_api.MAX_DURATION)),
+            )
+
+        totals = client.get("/stats", headers=auth_headers).json
+        assert totals["duration"] == pytest.approx(stats_api.MAX_DURATION * len(RUN_IDS))
 
     @pytest.mark.parametrize("bad", ["0", 1.5, None, True])
     def test_rejects_a_bad_exit_code(
@@ -799,6 +864,53 @@ class TestListRuns:
 
         listed = client.get(f"/stats/runs?limit={LIMIT_BELOW_ROW_COUNT}", headers=auth_headers).json
         assert len(listed) == LIMIT_BELOW_ROW_COUNT
+
+    def test_a_limit_is_filled_when_enough_valid_rows_exist(
+        self, app: flask.Flask, client: flask.testing.FlaskClient, auth_headers: dict
+    ) -> None:
+        """Do not let one unreadable row shorten the answer.
+
+        The limit is applied after the unparseable rows are dropped. With it
+        applied in SQL instead, `limit=1` returned an empty list whenever a
+        bad row happened to sort first.
+        """
+        for run_id in RUN_IDS:
+            _ok(client, auth_headers, _payload(run_id=run_id, timestamp=_now_iso()))
+
+        with app.app_context():
+            conn = flask_db.get_db()
+            conn.execute(
+                "UPDATE testrun_stats SET timestamp = 'nonsense' WHERE run_id = ?",
+                (RUN_IDS[0],),
+            )
+            conn.commit()
+
+        listed = client.get("/stats/runs?limit=1", headers=auth_headers).json
+
+        assert len(listed) == 1
+        assert listed[0]["run_id"] != RUN_IDS[0]
+
+    def test_totals_report_the_other_bucket(
+        self, client: flask.testing.FlaskClient, auth_headers: dict
+    ) -> None:
+        """Report `other` on the totals too, not only on each run."""
+        _ok(
+            client,
+            auth_headers,
+            _payload(
+                counts={
+                    "total": OTHER_TOTAL,
+                    "passed": OTHER_PASSED,
+                    "failed": OTHER_FAILED,
+                    "broken": 0,
+                    "skipped": 0,
+                }
+            ),
+        )
+
+        totals = client.get("/stats", headers=auth_headers).json
+
+        assert totals["other"] == EXPECTED_OTHER
 
     def test_does_not_expose_the_stored_payload(
         self, client: flask.testing.FlaskClient, auth_headers: dict

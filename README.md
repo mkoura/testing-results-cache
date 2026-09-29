@@ -317,11 +317,16 @@ Notes on the fields:
 - No number anywhere in the document may be non-finite. `NaN`, `Infinity` and
   `-Infinity` are refused, and so is a literal like `1e400` that overflows to
   infinity. Python's JSON parser accepts all of them; the format does not.
+- `duration` is capped at 1,000,000,000 seconds, about 31 years. Like the
+  count cap, this is not about one upload: durations are summed across rows,
+  and a float sum reaches infinity silently rather than failing, which would
+  leave the totals unreadable.
 - Anything else in the document is stored and handed back only by the
   database, not by the read routes. That is where `versions` and `commands`
   live until a query needs them as columns. The stored document is
-  re-serialised canonically, so the values all survive but key order and
-  whitespace do not.
+  re-serialised canonically as UTF-8, so the values all survive but key order
+  and whitespace do not, and the stored form is never larger than the request
+  that carried it.
 - The body is capped at 64 kB, well under the service-wide 16 MB limit.
 
 ### Read the totals
@@ -333,7 +338,8 @@ curl -u stats:token 'http://localhost:5000/stats?project=cardano-node-tests&days
 `project` and `days` are both optional. `days` must be between 1 and 366.
 
 The response sums `runs`, `cases`, `passed`, `failed`, `broken`, `skipped`,
-`never_run` and `duration`. A non-zero `never_run` means interrupted runs were
+`never_run` and `duration`, and reports `other` the same way the per-run
+listing does. A non-zero `never_run` means interrupted runs were
 included, so the other totals are a floor rather than a total.
 
 ### List individual runs, newest first

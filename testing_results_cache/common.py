@@ -166,3 +166,8 @@ class TestrunStatsTotals(NamedTuple):
     # read as complete when they are a floor.
     never_run: int
     duration: float
+
+    @property
+    def other(self) -> int:
+        """Tests whose status was none of the four allure statuses."""
+        return self.cases - self.passed - self.failed - self.broken - self.skipped
