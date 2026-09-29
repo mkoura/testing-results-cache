@@ -109,3 +109,56 @@ class SyncResultsEntry(NamedTuple):
 
     version: str
     timestamp: datetime
+
+
+class TestrunStatsEntry(NamedTuple):
+    """Counts for one test run, as uploaded by the client.
+
+    The five identity fields together are unique. `cases` is the total after
+    the client grouped its result files per test, and `passed`/`failed`/
+    `broken`/`skipped` are allure statuses - anything else the client saw is
+    `cases` minus those four, so it is derived rather than stored.
+
+    `never_run` is a subset of `skipped`, not a sibling bucket: a test the
+    registration pass registered and the real run never reached carries
+    status "skipped". Above zero it means the run was interrupted, so every
+    count here is a floor rather than a total.
+
+    `timestamp` is always tz-aware UTC, attached by
+    `stats_cache._parse_timestamp` when rows are read back. `payload` is the
+    uploaded JSON document, stored verbatim.
+    """
+
+    project: str
+    testrun_name: str
+    run_id: str
+    step: str
+    origin: str
+    timestamp: datetime
+    cases: int
+    passed: int
+    failed: int
+    broken: int
+    skipped: int
+    never_run: int
+    duration: float
+    exit_code: int
+    filtered: bool
+    payload: str
+
+    @property
+    def other(self) -> int:
+        """Tests whose status was none of the four allure statuses."""
+        return self.cases - self.passed - self.failed - self.broken - self.skipped
+
+
+class TestrunStatsTotals(NamedTuple):
+    """Sums across a set of runs, for the "how much testing did we do" question."""
+
+    runs: int
+    cases: int
+    passed: int
+    failed: int
+    broken: int
+    skipped: int
+    duration: float

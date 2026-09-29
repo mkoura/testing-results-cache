@@ -236,6 +236,98 @@ Download the stored zip for a version:
 curl -u username:password http://localhost:5000/sync-results/11.1.0/zip
 ```
 
+## Per-run test statistics
+
+Separate again from `/results` and `/history`, and for a specific reason: JUnit
+is a standardised format and cannot carry the metadata these counts need
+(software versions, CLI command coverage) without breaking its schema.
+`/results/.../import` parses JUnit and stores verdicts, `/history` stores raw
+JUnit and parses nothing, and this endpoint stores numbers the client already
+computed. **The service never parses a test report here.**
+
+The client does the counting because the source is allure, not JUnit.
+`cardano-node-tests` runs pytest twice into one results directory (a
+`--skipall` registration pass, then the real run), so result files have to be
+grouped by allure `historyId` before anything is counted. That logic lives in
+`scripts/count_test_results.py` in that repo.
+
+A run is identified by five fields together: `project`, `testrun_name`,
+`run_id`, `step` and `origin`. All five are needed - `run_id` repeats across
+projects, the upgrade path reports three `step`s under one run, and `origin`
+(`ci` or `local`) keeps a developer's local run out of the CI numbers.
+Re-uploading the same five replaces the row rather than adding one, so the
+uploader is safe to retry.
+
+### Authentication
+
+The same HTTP basic auth as every other route. The "token" is the password
+half of the credentials pair, so no separate token store exists:
+
+```sh
+flask --app testing_results_cache add-user stats <token>
+```
+
+Put `stats:<token>` in CI secrets, and export it locally for a local test run.
+Revoke by deleting the row from the `users` table.
+
+### Upload the counts for one run
+
+The whole identity lives in the body, not the URL, so the two cannot disagree.
+
+```sh
+curl -X PUT --fail-with-body -u stats:token http://localhost:5000/stats \
+  -H 'Content-Type: application/json' -d '{
+  "schema": 1,
+  "project": "cardano-node-tests",
+  "testrun_name": "node-10.5.0",
+  "run_id": "1234",
+  "step": "main",
+  "origin": "ci",
+  "timestamp": "2026-05-31T00:39:35+01:00",
+  "duration": 4527.316,
+  "exit_code": 0,
+  "filtered": false,
+  "counts": {"total": 2145, "passed": 1892, "failed": 0, "broken": 0, "skipped": 253},
+  "quality": {"never_run": 0, "no_history_id": 0, "read_errors": 0},
+  "versions": {"cardano_node": "10.5.0"},
+  "commands": {"count": 213130, "coverage_pct": 31.01}
+}'
+```
+
+Notes on the fields:
+
+- `counts` holds allure statuses. `broken` has no JUnit equivalent. The four
+  buckets may sum to less than `total`; the remainder is reported back as
+  `other` and needs no column.
+- `quality.never_run` counts tests the registration pass registered that never
+  got a real result, which means the run was interrupted and every count is a
+  floor rather than a total. It is a **subset of `skipped`**, because a
+  registration result carries status `skipped`, and an upload where it exceeds
+  `skipped` is refused.
+- `step` defaults to `main` when absent. The upgrade path sends `step1`,
+  `step2`, `step3`.
+- Anything else in the document is stored verbatim and handed back only by the
+  database, not by the read routes. That is where `versions` and `commands`
+  live until a query needs them as columns.
+- The body is capped at 64 kB, well under the service-wide 16 MB limit.
+
+### Read the totals
+
+```sh
+curl -u stats:token 'http://localhost:5000/stats?project=cardano-node-tests&days=30'
+```
+
+`project` and `days` are both optional. `days` must be between 1 and 366.
+
+### List individual runs, newest first
+
+```sh
+curl -u stats:token 'http://localhost:5000/stats/runs?project=cardano-node-tests&limit=20'
+```
+
+The listing is summary only. It never returns test names, failure messages or
+the stored document, so it stays safe to build a summary page on.
+
 ## Run tests
 
 ```sh
