@@ -33,21 +33,8 @@ def _get_xml_root(junit_file: Path) -> etree._Element:
 def _parse_junit_timestamp(value: str) -> datetime:
     """Parse a JUnit `<testsuite timestamp=...>` value into tz-aware UTC.
 
-    `datetime.fromisoformat`, not a fixed `strptime` format. The previous
-    fixed format accepted exactly one shape, `...%f+00:00`, and raised on
-    two that pytest really emits:
-
-    * a non-UTC offset, e.g. `+01:00`, which is what every run on a machine
-      not set to UTC produces. CI runners are UTC, so this never surfaced
-      while CI was the only caller.
-    * a whole-second timestamp, which pytest writes without the `.%f` part
-      because it calls `datetime.isoformat()`.
-
-    Both reached `import_results` as a ValueError and were reported to the
-    client as "Failed to import testrun".
-
-    A value with no offset at all is read as UTC, which is what the old code
-    did after stripping `+00:00`.
+    Accepts any offset and whole seconds, as pytest writes both. A value with
+    no offset is read as UTC.
 
     Args:
         value: The `timestamp` attribute of the `<testsuite>` element.
@@ -64,13 +51,8 @@ def _parse_junit_timestamp(value: str) -> datetime:
             return parsed.replace(tzinfo=UTC)
         return parsed.astimezone(UTC)
     except OverflowError as exc:
-        # `fromisoformat` accepts offsets up to +/-24h, so a year at either
-        # end of the range converts out of `datetime`'s range in
-        # `astimezone`. Re-raised as ValueError because that is what the
-        # import route catches to answer 400; left as OverflowError it
-        # escapes as an unhandled 500 with an HTML body. The old fixed
-        # format raised ValueError for the same input, so this keeps the
-        # caller's contract unchanged.
+        # A +/-24h offset overflows at either end of the year range. The
+        # import route answers 400 for a ValueError only.
         err = f"Timestamp out of range: {value!r}"
         raise ValueError(err) from exc
 
