@@ -303,12 +303,21 @@ Notes on the fields:
   got a real result, which means the run was interrupted and every count is a
   floor rather than a total. It is a **subset of `skipped`**, because a
   registration result carries status `skipped`, and an upload where it exceeds
-  `skipped` is refused.
+  `skipped` is refused. `quality` is **required**: defaulting `never_run` to
+  zero would silently claim an interrupted run was complete, which is the one
+  thing the field exists to prevent.
 - `step` defaults to `main` when absent. The upgrade path sends `step1`,
   `step2`, `step3`.
-- Anything else in the document is stored verbatim and handed back only by the
+- `timestamp` is ISO-8601. A value without an offset is read as UTC. Years
+  before 1000 are refused, because the stored format cannot read them back.
+- `duration` must be finite. `NaN` and `Infinity` are refused, including the
+  bare JSON literals, which most JSON parsers emit but the format does not
+  allow.
+- Anything else in the document is stored and handed back only by the
   database, not by the read routes. That is where `versions` and `commands`
-  live until a query needs them as columns.
+  live until a query needs them as columns. The stored document is
+  re-serialised canonically, so the values all survive but key order and
+  whitespace do not.
 - The body is capped at 64 kB, well under the service-wide 16 MB limit.
 
 ### Read the totals
@@ -319,6 +328,10 @@ curl -u stats:token 'http://localhost:5000/stats?project=cardano-node-tests&days
 
 `project` and `days` are both optional. `days` must be between 1 and 366.
 
+The response sums `runs`, `cases`, `passed`, `failed`, `broken`, `skipped`,
+`never_run` and `duration`. A non-zero `never_run` means interrupted runs were
+included, so the other totals are a floor rather than a total.
+
 ### List individual runs, newest first
 
 ```sh
@@ -327,6 +340,10 @@ curl -u stats:token 'http://localhost:5000/stats/runs?project=cardano-node-tests
 
 The listing is summary only. It never returns test names, failure messages or
 the stored document, so it stays safe to build a summary page on.
+
+`limit` must be between 1 and 1000. A larger value is refused rather than
+quietly capped: there is no cursor on this route, so a truncated listing would
+otherwise look complete.
 
 ## Run tests
 

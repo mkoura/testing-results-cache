@@ -24,6 +24,7 @@ CI secrets, and export it locally. Nothing here needs a second auth path.
 """
 
 import json
+import math
 import sqlite3
 from datetime import UTC
 from datetime import datetime
@@ -32,6 +33,7 @@ from typing import NoReturn
 from typing import Optional
 
 import flask
+from werkzeug.exceptions import HTTPException
 
 from testing_results_cache import common
 from testing_results_cache import flask_auth
@@ -56,6 +58,10 @@ DEFAULT_STEP = "main"
 # Guards the day window on the read routes. A year of history is more than
 # any dashboard panel asks for, and it keeps the scan bounded.
 MAX_DAYS = 366
+
+# SQLite stores integers as signed 64-bit. A larger value raises OverflowError
+# inside the driver, which would surface as a 500 for what is a client error.
+MAX_SQLITE_INT = 2**63 - 1
 
 _COUNT_FIELDS = ("total", "passed", "failed", "broken", "skipped")
 
@@ -85,6 +91,12 @@ def _abort_read_failure(context: str) -> NoReturn:
     common.abort_json(500, "Failed to read testrun stats")
 
 
+def _reject_json_constant(name: str) -> NoReturn:
+    """Refuse NaN and Infinity, which json.loads accepts but JSON does not."""
+    err = f"{name} is not valid JSON"
+    raise ValueError(err)
+
+
 def _body() -> dict:
     """Return the request body as a JSON object, or refuse it.
 
@@ -100,7 +112,12 @@ def _body() -> dict:
         common.abort_json(413, f"Payload larger than {MAX_PAYLOAD_BYTES} bytes")
 
     try:
-        payload = json.loads(raw)
+        # parse_constant fires for the `NaN`, `Infinity` and `-Infinity`
+        # literals, which json.loads accepts by default and json.dumps emits
+        # back. They are not valid JSON, so a single upload carrying one
+        # would make `GET /stats` unparseable for every caller from then on
+        # (SUM propagates a non-finite float across every row).
+        payload = json.loads(raw, parse_constant=_reject_json_constant)
     except (ValueError, UnicodeDecodeError):
         common.abort_json(400, "Body is not valid JSON")
     if not isinstance(payload, dict):
@@ -120,7 +137,12 @@ def _required_segment(payload: dict, name: str, default: Optional[str] = None) -
     not survive a path segment is refused at write time rather than becoming
     a row nothing can reach.
     """
-    value = payload.get(name, default)
+    # `None` is treated as absent, not as a bad value: a client that
+    # serialises an unset optional field as `null` means the same thing as
+    # leaving it out, and `step` is documented as defaulting when absent.
+    value = payload.get(name)
+    if value is None:
+        value = default
     if value is None or not isinstance(value, str) or not value:
         common.abort_json(400, f"Missing or non-string field {name!r}")
     common.reject_invalid_segments(value)
@@ -134,6 +156,8 @@ def _non_negative_int(payload: dict, name: str, container: str = "") -> int:
     # otherwise `"passed": true` would silently store 1.
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         common.abort_json(400, f"Field {where!r} must be a non-negative integer")
+    if value > MAX_SQLITE_INT:
+        common.abort_json(400, f"Field {where!r} is larger than {MAX_SQLITE_INT}")
     return value
 
 
@@ -153,8 +177,7 @@ def _counts(payload: dict) -> dict:
     if bucketed > values["total"]:
         common.abort_json(
             400,
-            f"counts: passed+failed+broken+skipped ({bucketed}) "
-            f"exceeds total ({values['total']})",
+            f"counts: passed+failed+broken+skipped ({bucketed}) exceeds total ({values['total']})",
         )
     return values
 
@@ -166,9 +189,15 @@ def _never_run(payload: dict, skipped: int) -> int:
     above `skipped` means the client counted something inconsistently and
     the row would misreport how complete the run was.
     """
-    quality = payload.get("quality") or {}
+    # Not `payload.get("quality") or {}`: that turns a falsy non-dict such as
+    # `[]` into `{}` and the type error below is never reported, so the caller
+    # gets a confusing "quality.never_run" message about a field they did not
+    # send. `quality` is required rather than defaulted - defaulting
+    # `never_run` to 0 would silently claim an interrupted run was complete,
+    # which is the one thing this column exists to prevent.
+    quality = payload.get("quality")
     if not isinstance(quality, dict):
-        common.abort_json(400, "Field 'quality' must be an object")
+        common.abort_json(400, "Missing or non-object field 'quality'")
     value = _non_negative_int(quality, "never_run", "quality")
     if value > skipped:
         common.abort_json(
@@ -179,8 +208,14 @@ def _never_run(payload: dict, skipped: int) -> int:
 
 def _duration(payload: dict) -> float:
     value = payload.get("duration")
-    if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+    if isinstance(value, bool) or not isinstance(value, int | float) or value < 0:
         common.abort_json(400, "Field 'duration' must be a non-negative number")
+    # `math.isfinite` as well as the sign test: `float("inf") < 0` is False, so
+    # the check above passes it, and `float("nan")` compares False against
+    # everything. Either one stored here poisons SUM(duration) for every
+    # caller, and NaN reaches sqlite as NULL against a NOT NULL column.
+    if not math.isfinite(value):
+        common.abort_json(400, "Field 'duration' must be a finite number")
     return float(value)
 
 
@@ -188,6 +223,8 @@ def _exit_code(payload: dict) -> int:
     value = payload.get("exit_code")
     if isinstance(value, bool) or not isinstance(value, int):
         common.abort_json(400, "Field 'exit_code' must be an integer")
+    if not -MAX_SQLITE_INT <= value <= MAX_SQLITE_INT:
+        common.abort_json(400, "Field 'exit_code' is out of range")
     return value
 
 
@@ -203,11 +240,26 @@ def _timestamp(payload: dict) -> datetime:
         common.abort_json(400, "Field 'timestamp' must be an ISO-8601 string")
     try:
         parsed = datetime.fromisoformat(value)
-    except ValueError:
-        common.abort_json(400, f"Field 'timestamp' is not ISO-8601: {value!r}")
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=UTC)
-    return parsed.astimezone(UTC)
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=UTC)
+        # OverflowError, not just ValueError: fromisoformat accepts offsets up
+        # to +/-24h, so a near-limit year converts out of datetime's range
+        # here. Unhandled it escapes as Werkzeug's HTML 500 and breaks the
+        # JSON-error contract every other response keeps.
+        parsed = parsed.astimezone(UTC)
+    except (ValueError, OverflowError):
+        common.abort_json(400, f"Field 'timestamp' is not a usable ISO-8601 value: {value!r}")
+
+    # This is the first table whose timestamps come from the client rather
+    # than from `datetime.now(UTC)`, so the storage format has to be checked
+    # rather than assumed. `strftime("%Y")` does not zero-pad, and
+    # `strptime("%Y")` demands four digits, so a year below 1000 writes a row
+    # that `list_testrun_stats` can never read back - while `get_totals`,
+    # which never parses the column, still counts it. The two routes would
+    # then disagree forever with no way to reach the row through the API.
+    if not stats_cache.timestamp_round_trips(parsed):
+        common.abort_json(400, f"Field 'timestamp' is outside the storable range: {value!r}")
+    return parsed
 
 
 def _filtered(payload: dict) -> bool:
@@ -238,8 +290,13 @@ def _parse_limit() -> int:
         limit = int(raw)
     except ValueError:
         common.abort_json(400, f"Query parameter 'limit' must be an integer, got {raw!r}")
-    if limit < 1:
-        common.abort_json(400, "Query parameter 'limit' must be at least 1")
+    # Refused rather than silently clamped: there is no cursor or offset on
+    # this route, so a caller who asked for more than the cap and got exactly
+    # the cap back has no way to tell that rows were dropped.
+    if not 1 <= limit <= stats_cache.MAX_LIST_ROWS:
+        common.abort_json(
+            400, f"Query parameter 'limit' must be between 1 and {stats_cache.MAX_LIST_ROWS}"
+        )
     return limit
 
 
@@ -247,8 +304,11 @@ def _parse_project_arg() -> Optional[str]:
     value = flask.request.args.get("project")
     if value is None:
         return None
-    common.reject_invalid_segments(value)
-    return value
+    # `str(...)`: werkzeug types `args.get` as returning Any, and returning it
+    # straight fails mypy's no-any-return.
+    project = str(value)
+    common.reject_invalid_segments(project)
+    return project
 
 
 def _entry_dict(entry: common.TestrunStatsEntry) -> dict:
@@ -306,8 +366,10 @@ def upload_stats() -> dict:
         duration=_duration(payload),
         exit_code=_exit_code(payload),
         filtered=_filtered(payload),
-        # Stored as the client sent it, re-serialised from the parsed object
-        # so what lands in the column is always valid JSON of a known size.
+        # Re-serialised from the parsed object, not stored byte for byte: the
+        # values all survive, but key order, whitespace, non-ASCII escaping
+        # and any duplicate keys do not. That is deliberate - what lands in
+        # the column is then always valid, canonical JSON of a known size.
         payload=json.dumps(payload, separators=(",", ":"), sort_keys=True),
     )
 
@@ -316,6 +378,11 @@ def upload_stats() -> dict:
     try:
         stats_cache.save_testrun_stats(conn=conn, entry=entry, user_id=user_id)
         conn.commit()
+    except HTTPException:
+        # Never swallow an intentional abort into the generic 500 below. The
+        # try block holds only the save and the commit today, so nothing
+        # aborts inside it - this keeps that true if anything moves in.
+        raise
     except sqlite3.OperationalError as exc:
         _rollback(conn, run_id)
         # Masked to the low byte so a WAL busy (SQLITE_BUSY_SNAPSHOT) is not
@@ -357,6 +424,7 @@ def get_totals() -> dict:
         "failed": totals.failed,
         "broken": totals.broken,
         "skipped": totals.skipped,
+        "never_run": totals.never_run,
         "duration": totals.duration,
         "project": project,
         "days": days,
@@ -373,9 +441,7 @@ def list_runs() -> List[dict]:
 
     conn = flask_db.get_db()
     try:
-        entries = stats_cache.list_testrun_stats(
-            conn=conn, project=project, days=days, limit=limit
-        )
+        entries = stats_cache.list_testrun_stats(conn=conn, project=project, days=days, limit=limit)
     except sqlite3.Error:
         _abort_read_failure("listing")
 

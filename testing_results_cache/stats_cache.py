@@ -4,6 +4,11 @@ Unlike history_cache.py, which records only that a file landed, this stores
 the numbers themselves - the client has already done the counting. The
 server never parses a test report here.
 
+The timestamps in this table come from the client, not from `datetime.now`,
+so the storage format is not self-enforcing the way it is in the other two
+cache modules. `timestamp_round_trips` exists for that, and the API layer
+calls it before any row is written.
+
 Like sync_results_cache.py, a re-upload for the same run replaces the row
 instead of being rejected as a duplicate: the uploader runs at the end of a
 test script and may legitimately be retried.
@@ -13,6 +18,7 @@ import logging
 import sqlite3
 from datetime import UTC
 from datetime import datetime
+from datetime import timedelta
 from typing import List
 from typing import Optional
 
@@ -37,6 +43,22 @@ def _format_timestamp(value: datetime) -> str:
 
 def _parse_timestamp(value: str) -> datetime:
     return datetime.strptime(value, TIMESTAMP_FORMAT).replace(tzinfo=UTC)
+
+
+def timestamp_round_trips(value: datetime) -> bool:
+    """Check a timestamp survives being written and read back.
+
+    Unlike the other two tables, the timestamps here come from the client, so
+    the storage format cannot be assumed to fit. `strftime("%Y")` does not
+    zero-pad while `strptime("%Y")` requires four digits, so a year below 1000
+    formats to something that can never be parsed again. Checked by doing the
+    round trip rather than by testing the year, so this stays correct if
+    TIMESTAMP_FORMAT changes.
+    """
+    try:
+        return _parse_timestamp(_format_timestamp(value)) == value
+    except (ValueError, OverflowError):
+        return False
 
 
 def save_testrun_stats(
@@ -103,12 +125,17 @@ def _window_clause(project: Optional[str], days: Optional[int]) -> tuple:
         clauses.append("project = ?")
         params.append(project)
     if days is not None:
-        # Compared as text, which works because TIMESTAMP_FORMAT is
-        # zero-padded and lexicographically ordered. Same approach as
-        # history_cache's day window.
-        cutoff = datetime.now(UTC).timestamp() - days * 86400
+        # Compared as text. That is sound only because every stored value is
+        # zero-padded and fixed-width, which the API layer enforces with
+        # `timestamp_round_trips` before any row is written - here the
+        # timestamps come from the client, so unlike history_cache and
+        # sync_results_cache the format is not self-enforcing.
+        #
+        # `timedelta`, not a float epoch round trip: same arithmetic as
+        # history_cache's day window, without the lossy conversion.
+        cutoff = datetime.now(UTC) - timedelta(days=days)
         clauses.append("timestamp >= ?")
-        params.append(_format_timestamp(datetime.fromtimestamp(cutoff, UTC)))
+        params.append(_format_timestamp(cutoff))
     where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
     return where, params
 
@@ -122,7 +149,8 @@ def get_totals(
     cur.execute(
         "SELECT COUNT(*), "
         "COALESCE(SUM(cases),0), COALESCE(SUM(passed),0), COALESCE(SUM(failed),0), "
-        "COALESCE(SUM(broken),0), COALESCE(SUM(skipped),0), COALESCE(SUM(duration),0) "
+        "COALESCE(SUM(broken),0), COALESCE(SUM(skipped),0), COALESCE(SUM(never_run),0), "
+        "COALESCE(SUM(duration),0) "
         f"FROM testrun_stats{where}",
         params,
     )
@@ -134,7 +162,8 @@ def get_totals(
         failed=row[3],
         broken=row[4],
         skipped=row[5],
-        duration=row[6],
+        never_run=row[6],
+        duration=row[7],
     )
 
 

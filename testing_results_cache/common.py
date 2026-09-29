@@ -161,4 +161,8 @@ class TestrunStatsTotals(NamedTuple):
     failed: int
     broken: int
     skipped: int
+    # Summed as well as the buckets: without it a caller of the aggregate has
+    # no way to know that interrupted runs were included, and the totals would
+    # read as complete when they are a floor.
+    never_run: int
     duration: float

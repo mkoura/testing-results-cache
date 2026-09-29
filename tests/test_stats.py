@@ -1,26 +1,58 @@
-"""Tests for the /stats endpoints.
+"""Tests for the per-run statistics endpoints (/stats...).
 
-The properties that matter here are: the endpoint refuses a payload it
-cannot store faithfully, a re-upload of the same run replaces rather than
-duplicates, and the aggregates only ever count what was actually stored.
+Deliberately separate from /import and /history: the server stores counts the
+client computed and never parses a test report. The properties that matter
+are that a payload it cannot store faithfully is refused, that a re-upload of
+the same run replaces rather than duplicates, and that the aggregates count
+only what was actually stored.
 
 The counts in VALID_PAYLOAD are the real output of
 `scripts/count_test_results.py` on a real allure results directory from
 cardano-node-tests (2145 tests, 1892 passed, 253 skipped), so the happy path
-is exercised with numbers a real client actually produces.
+uses numbers a real client actually produces.
+
+Several tests here cover values that only a client can supply. This is the
+first table whose timestamps and counts are not server-generated, so the
+range and finiteness checks are load-bearing rather than defensive.
 """
 
+import base64
 import copy
+import http
 import json
 import sqlite3
-from typing import Any
+from datetime import UTC
+from datetime import datetime
+from datetime import timedelta
+from typing import List
 
 import flask
 import flask.testing
 import pytest
 
+# See the note in test_sync_results.py: `types-werkzeug` does not know about
+# this class, though it is real at runtime.
+from werkzeug.test import TestResponse  # type: ignore[attr-defined]
+
 from testing_results_cache import flask_db
 from testing_results_cache import stats_api
+from testing_results_cache import stats_cache
+
+TOTAL_CASES = 2145
+TOTAL_PASSED = 1892
+TOTAL_SKIPPED = 253
+TOTAL_DURATION = 4527.316
+
+UPGRADE_STEPS = ("step1", "step2", "step3")
+RUN_IDS = ("1", "2", "3")
+# Two uploads that differ in exactly one identity field must both survive.
+ROWS_FOR_TWO_IDENTITIES = 2
+# A `total` above the four buckets, so the derived `other` is non-zero.
+OTHER_TOTAL = 10
+OTHER_PASSED = 6
+OTHER_FAILED = 1
+EXPECTED_OTHER = OTHER_TOTAL - OTHER_PASSED - OTHER_FAILED
+LIMIT_BELOW_ROW_COUNT = 2
 
 VALID_PAYLOAD: dict = {
     "schema": 1,
@@ -30,58 +62,81 @@ VALID_PAYLOAD: dict = {
     "step": "main",
     "origin": "ci",
     "timestamp": "2026-05-31T00:39:35+01:00",
-    "duration": 4527.316,
+    "duration": TOTAL_DURATION,
     "exit_code": 0,
     "filtered": False,
-    "counts": {"total": 2145, "passed": 1892, "failed": 0, "broken": 0, "skipped": 253},
+    "counts": {
+        "total": TOTAL_CASES,
+        "passed": TOTAL_PASSED,
+        "failed": 0,
+        "broken": 0,
+        "skipped": TOTAL_SKIPPED,
+    },
     "quality": {"never_run": 0, "no_history_id": 0, "read_errors": 0},
     "versions": {"cardano_node": "10.5.0", "cardano_cli": None, "db_sync": None},
     "commands": {"count": 213130, "coverage_pct": 31.01},
 }
 
 
-def _payload(**overrides: Any) -> dict:
+def _payload(**overrides: object) -> dict:
     out = copy.deepcopy(VALID_PAYLOAD)
     out.update(overrides)
     return out
 
 
-def _put(client: flask.testing.FlaskClient, headers: dict, payload: dict) -> Any:
-    return client.put("/stats", data=json.dumps(payload), headers=headers)
+def _put(client: flask.testing.FlaskClient, headers: dict, payload: dict | str) -> TestResponse:
+    body = payload if isinstance(payload, str) else json.dumps(payload)
+    return client.put("/stats", data=body, headers=headers)
+
+
+def _ok(client: flask.testing.FlaskClient, headers: dict, payload: dict) -> None:
+    """Upload a payload that must be accepted, failing loudly if it is not."""
+    response = _put(client, headers, payload)
+    assert response.status_code == http.HTTPStatus.OK, response.data
+
+
+def _row_count(app: flask.Flask) -> int:
+    with app.app_context():
+        conn = flask_db.get_db()
+        return int(conn.execute("SELECT COUNT(*) FROM testrun_stats").fetchone()[0])
+
+
+def _now_iso() -> str:
+    return datetime.now(UTC).isoformat()
 
 
 class TestAuth:
     def test_upload_requires_auth(self, client: flask.testing.FlaskClient) -> None:
         response = client.put("/stats", data=json.dumps(VALID_PAYLOAD))
-        assert response.status_code == 401
+        assert response.status_code == http.HTTPStatus.UNAUTHORIZED
 
     def test_totals_require_auth(self, client: flask.testing.FlaskClient) -> None:
-        assert client.get("/stats").status_code == 401
+        assert client.get("/stats").status_code == http.HTTPStatus.UNAUTHORIZED
 
     def test_runs_require_auth(self, client: flask.testing.FlaskClient) -> None:
-        assert client.get("/stats/runs").status_code == 401
+        assert client.get("/stats/runs").status_code == http.HTTPStatus.UNAUTHORIZED
 
     def test_wrong_password_is_refused(self, client: flask.testing.FlaskClient) -> None:
-        import base64
-
         creds = base64.b64encode(b"tester:wrong").decode()
-        response = client.put(
-            "/stats",
-            data=json.dumps(VALID_PAYLOAD),
-            headers={"Authorization": f"Basic {creds}"},
-        )
-        assert response.status_code == 401
+        response = _put(client, {"Authorization": f"Basic {creds}"}, VALID_PAYLOAD)
+        assert response.status_code == http.HTTPStatus.UNAUTHORIZED
 
     def test_the_uploading_user_is_recorded(
         self, app: flask.Flask, client: flask.testing.FlaskClient, auth_headers: dict
     ) -> None:
         """Martin's requirement: the write uses the same user_id as the other routes."""
-        assert _put(client, auth_headers, VALID_PAYLOAD).status_code == 200
+        _ok(client, auth_headers, VALID_PAYLOAD)
 
         with app.app_context():
             conn = flask_db.get_db()
             row = conn.execute("SELECT user_id FROM testrun_stats").fetchone()
         assert row[0] is not None
+
+    def test_a_second_user_can_also_upload(
+        self, client: flask.testing.FlaskClient, other_auth_headers: dict
+    ) -> None:
+        """There is no per-account ownership on this service - one team, one dataset."""
+        _ok(client, other_auth_headers, VALID_PAYLOAD)
 
 
 class TestUpload:
@@ -90,7 +145,7 @@ class TestUpload:
     ) -> None:
         response = _put(client, auth_headers, VALID_PAYLOAD)
 
-        assert response.status_code == 200, response.data
+        assert response.status_code == http.HTTPStatus.OK, response.data
         assert response.json["run_id"] == "1234"
 
         with app.app_context():
@@ -101,36 +156,47 @@ class TestUpload:
             ).fetchone()
         # tuple(): the app sets row_factory to sqlite3.Row, which does not
         # compare equal to a plain tuple.
-        assert tuple(row) == (2145, 1892, 0, 0, 253, 0, pytest.approx(4527.316), 0, 0)
+        assert tuple(row) == (
+            TOTAL_CASES,
+            TOTAL_PASSED,
+            0,
+            0,
+            TOTAL_SKIPPED,
+            0,
+            pytest.approx(TOTAL_DURATION),
+            0,
+            0,
+        )
 
     def test_post_is_accepted_too(
         self, client: flask.testing.FlaskClient, auth_headers: dict
     ) -> None:
         response = client.post("/stats", data=json.dumps(VALID_PAYLOAD), headers=auth_headers)
-        assert response.status_code == 200
+        assert response.status_code == http.HTTPStatus.OK
 
-    def test_payload_is_stored_verbatim(
+    def test_payload_is_stored(
         self, app: flask.Flask, client: flask.testing.FlaskClient, auth_headers: dict
     ) -> None:
         """The fields with no column of their own must survive the round trip."""
-        assert _put(client, auth_headers, VALID_PAYLOAD).status_code == 200
+        _ok(client, auth_headers, VALID_PAYLOAD)
 
         with app.app_context():
             conn = flask_db.get_db()
             stored = conn.execute("SELECT payload FROM testrun_stats").fetchone()[0]
 
         parsed = json.loads(stored)
-        assert parsed["commands"] == {"count": 213130, "coverage_pct": 31.01}
+        assert parsed["commands"] == VALID_PAYLOAD["commands"]
         assert parsed["versions"]["cardano_node"] == "10.5.0"
         assert parsed["quality"]["read_errors"] == 0
 
     def test_reupload_replaces_instead_of_duplicating(
         self, app: flask.Flask, client: flask.testing.FlaskClient, auth_headers: dict
     ) -> None:
-        assert _put(client, auth_headers, VALID_PAYLOAD).status_code == 200
-
-        second = _payload(counts={**VALID_PAYLOAD["counts"], "failed": 5, "passed": 1887})
-        assert _put(client, auth_headers, second).status_code == 200
+        _ok(client, auth_headers, VALID_PAYLOAD)
+        second = _payload(
+            counts={**VALID_PAYLOAD["counts"], "failed": 5, "passed": TOTAL_PASSED - 5}
+        )
+        _ok(client, auth_headers, second)
 
         with app.app_context():
             conn = flask_db.get_db()
@@ -145,13 +211,10 @@ class TestUpload:
         auth_headers: dict,
         field: str,
     ) -> None:
-        assert _put(client, auth_headers, VALID_PAYLOAD).status_code == 200
-        assert _put(client, auth_headers, _payload(**{field: "different"})).status_code == 200
+        _ok(client, auth_headers, VALID_PAYLOAD)
+        _ok(client, auth_headers, _payload(**{field: "different"}))
 
-        with app.app_context():
-            conn = flask_db.get_db()
-            count = conn.execute("SELECT COUNT(*) FROM testrun_stats").fetchone()[0]
-        assert count == 2
+        assert _row_count(app) == ROWS_FOR_TWO_IDENTITIES
 
     def test_step_defaults_when_absent(
         self, client: flask.testing.FlaskClient, auth_headers: dict
@@ -161,27 +224,31 @@ class TestUpload:
 
         response = _put(client, auth_headers, payload)
 
-        assert response.status_code == 200
+        assert response.status_code == http.HTTPStatus.OK
+        assert response.json["step"] == stats_api.DEFAULT_STEP
+
+    def test_step_defaults_when_explicitly_null(
+        self, client: flask.testing.FlaskClient, auth_headers: dict
+    ) -> None:
+        """A client that serialises an unset field as null means "absent"."""
+        response = _put(client, auth_headers, _payload(step=None))
+
+        assert response.status_code == http.HTTPStatus.OK
         assert response.json["step"] == stats_api.DEFAULT_STEP
 
     def test_the_three_upgrade_steps_coexist(
         self, app: flask.Flask, client: flask.testing.FlaskClient, auth_headers: dict
     ) -> None:
         """The upgrade path reports three steps under one run id."""
-        for step in ("step1", "step2", "step3"):
-            assert _put(client, auth_headers, _payload(step=step)).status_code == 200
+        for step in UPGRADE_STEPS:
+            _ok(client, auth_headers, _payload(step=step))
 
-        with app.app_context():
-            conn = flask_db.get_db()
-            count = conn.execute("SELECT COUNT(*) FROM testrun_stats").fetchone()[0]
-        assert count == 3
+        assert _row_count(app) == len(UPGRADE_STEPS)
 
     def test_a_naive_timestamp_is_read_as_utc(
-        self, app: flask.Flask, client: flask.testing.FlaskClient, auth_headers: dict
+        self, client: flask.testing.FlaskClient, auth_headers: dict
     ) -> None:
-        assert _put(
-            client, auth_headers, _payload(timestamp="2026-05-31T00:39:35")
-        ).status_code == 200
+        _ok(client, auth_headers, _payload(timestamp="2026-05-31T00:39:35"))
 
         response = client.get("/stats/runs", headers=auth_headers)
         assert response.json[0]["timestamp"].startswith("2026-05-31T00:39:35")
@@ -189,7 +256,7 @@ class TestUpload:
     def test_offset_is_converted_to_utc(
         self, client: flask.testing.FlaskClient, auth_headers: dict
     ) -> None:
-        assert _put(client, auth_headers, VALID_PAYLOAD).status_code == 200
+        _ok(client, auth_headers, VALID_PAYLOAD)
 
         response = client.get("/stats/runs", headers=auth_headers)
         # 00:39:35+01:00 is 23:39:35 UTC the previous day.
@@ -200,22 +267,53 @@ class TestValidation:
     def test_rejects_a_non_object_body(
         self, client: flask.testing.FlaskClient, auth_headers: dict
     ) -> None:
-        response = client.put("/stats", data=json.dumps([1, 2, 3]), headers=auth_headers)
-        assert response.status_code == 400
+        response = _put(client, auth_headers, json.dumps([1, 2, 3]))
+        assert response.status_code == http.HTTPStatus.BAD_REQUEST
         assert "JSON object" in response.json["message"]
 
     def test_rejects_malformed_json(
         self, client: flask.testing.FlaskClient, auth_headers: dict
     ) -> None:
-        response = client.put("/stats", data="{not json", headers=auth_headers)
-        assert response.status_code == 400
+        response = _put(client, auth_headers, "{not json")
+        assert response.status_code == http.HTTPStatus.BAD_REQUEST
         assert "not valid JSON" in response.json["message"]
+
+    @pytest.mark.parametrize("literal", ["NaN", "Infinity", "-Infinity"])
+    def test_rejects_the_json_constants_python_accepts(
+        self, app: flask.Flask, client: flask.testing.FlaskClient, auth_headers: dict, literal: str
+    ) -> None:
+        """json.loads accepts these; JSON does not, and a browser cannot read them back.
+
+        One stored non-finite duration would make SUM(duration) - and so the
+        whole unfiltered GET /stats body - unparseable for every caller.
+        """
+        body = json.dumps(VALID_PAYLOAD).replace(str(TOTAL_DURATION), literal)
+
+        response = _put(client, auth_headers, body)
+
+        assert response.status_code == http.HTTPStatus.BAD_REQUEST
+        assert "not valid JSON" in response.json["message"]
+        assert _row_count(app) == 0
+
+    def test_totals_stay_parseable_json(
+        self, client: flask.testing.FlaskClient, auth_headers: dict
+    ) -> None:
+        """A strict parser must be able to read the aggregate back."""
+        _ok(client, auth_headers, VALID_PAYLOAD)
+
+        response = client.get("/stats", headers=auth_headers)
+
+        def _no_constants(name: str) -> float:
+            msg = f"non-finite {name} in response"
+            raise AssertionError(msg)
+
+        json.loads(response.data, parse_constant=_no_constants)
 
     def test_rejects_an_unknown_schema(
         self, client: flask.testing.FlaskClient, auth_headers: dict
     ) -> None:
         response = _put(client, auth_headers, _payload(schema=2))
-        assert response.status_code == 400
+        assert response.status_code == http.HTTPStatus.BAD_REQUEST
         assert "Unsupported schema" in response.json["message"]
 
     def test_rejects_a_missing_schema(
@@ -223,14 +321,18 @@ class TestValidation:
     ) -> None:
         payload = copy.deepcopy(VALID_PAYLOAD)
         del payload["schema"]
-        assert _put(client, auth_headers, payload).status_code == 400
+        assert _put(client, auth_headers, payload).status_code == http.HTTPStatus.BAD_REQUEST
 
     def test_rejects_an_oversized_payload(
         self, client: flask.testing.FlaskClient, auth_headers: dict
     ) -> None:
         payload = _payload(notes="x" * (stats_api.MAX_PAYLOAD_BYTES + 1))
+
         response = _put(client, auth_headers, payload)
-        assert response.status_code == 413
+
+        assert response.status_code == http.HTTPStatus.REQUEST_ENTITY_TOO_LARGE
+        # The blueprint's own cap, not the app-wide 16MB handler.
+        assert str(stats_api.MAX_PAYLOAD_BYTES) in response.json["message"]
 
     @pytest.mark.parametrize("field", ["project", "testrun_name", "run_id", "origin"])
     def test_rejects_a_missing_identity_field(
@@ -238,8 +340,11 @@ class TestValidation:
     ) -> None:
         payload = copy.deepcopy(VALID_PAYLOAD)
         del payload[field]
+
         response = _put(client, auth_headers, payload)
-        assert response.status_code == 400
+
+        assert response.status_code == http.HTTPStatus.BAD_REQUEST
+        assert "Missing or non-string" in response.json["message"]
         assert field in response.json["message"]
 
     @pytest.mark.parametrize("bad", ["../etc", "has space", "..", "", "a/b"])
@@ -247,7 +352,12 @@ class TestValidation:
         self, client: flask.testing.FlaskClient, auth_headers: dict, bad: str
     ) -> None:
         """A value the read routes could not address must not become a row."""
-        assert _put(client, auth_headers, _payload(project=bad)).status_code == 400
+        response = _put(client, auth_headers, _payload(project=bad))
+
+        assert response.status_code == http.HTTPStatus.BAD_REQUEST
+        # The path-segment rejection specifically, not some earlier check.
+        expected = "Missing or non-string" if bad == "" else "Invalid path segment"
+        assert expected in response.json["message"]
 
     def test_rejects_counts_that_exceed_the_total(
         self, client: flask.testing.FlaskClient, auth_headers: dict
@@ -257,22 +367,29 @@ class TestValidation:
             auth_headers,
             _payload(counts={"total": 10, "passed": 8, "failed": 5, "broken": 0, "skipped": 0}),
         )
-        assert response.status_code == 400
+        assert response.status_code == http.HTTPStatus.BAD_REQUEST
         assert "exceeds total" in response.json["message"]
 
     def test_accepts_counts_that_sum_below_the_total(
         self, client: flask.testing.FlaskClient, auth_headers: dict
     ) -> None:
         """The shortfall is the 'other' bucket, which has no column."""
-        response = _put(
+        _ok(
             client,
             auth_headers,
-            _payload(counts={"total": 10, "passed": 6, "failed": 1, "broken": 0, "skipped": 0}),
+            _payload(
+                counts={
+                    "total": OTHER_TOTAL,
+                    "passed": OTHER_PASSED,
+                    "failed": OTHER_FAILED,
+                    "broken": 0,
+                    "skipped": 0,
+                }
+            ),
         )
-        assert response.status_code == 200
 
         listed = client.get("/stats/runs", headers=auth_headers).json[0]
-        assert listed["other"] == 3
+        assert listed["other"] == EXPECTED_OTHER
 
     @pytest.mark.parametrize("field", ["total", "passed", "failed", "broken", "skipped"])
     def test_rejects_a_missing_count(
@@ -280,80 +397,177 @@ class TestValidation:
     ) -> None:
         counts = dict(VALID_PAYLOAD["counts"])
         del counts[field]
-        assert _put(client, auth_headers, _payload(counts=counts)).status_code == 400
+
+        response = _put(client, auth_headers, _payload(counts=counts))
+
+        assert response.status_code == http.HTTPStatus.BAD_REQUEST
+        assert f"counts.{field}" in response.json["message"]
 
     @pytest.mark.parametrize("bad", [-1, "5", 1.5, None, True])
     def test_rejects_a_non_integer_count(
-        self, client: flask.testing.FlaskClient, auth_headers: dict, bad: Any
+        self, client: flask.testing.FlaskClient, auth_headers: dict, bad: object
     ) -> None:
         counts = {**VALID_PAYLOAD["counts"], "passed": bad}
-        assert _put(client, auth_headers, _payload(counts=counts)).status_code == 400
+        assert (
+            _put(client, auth_headers, _payload(counts=counts)).status_code
+            == http.HTTPStatus.BAD_REQUEST
+        )
+
+    def test_rejects_a_count_too_large_for_sqlite(
+        self, app: flask.Flask, client: flask.testing.FlaskClient, auth_headers: dict
+    ) -> None:
+        """An unbounded JSON integer would raise OverflowError inside the driver."""
+        huge = stats_api.MAX_SQLITE_INT + 1
+        counts = {**VALID_PAYLOAD["counts"], "total": huge}
+
+        response = _put(client, auth_headers, _payload(counts=counts))
+
+        assert response.status_code == http.HTTPStatus.BAD_REQUEST
+        assert "larger than" in response.json["message"]
+        assert _row_count(app) == 0
 
     def test_rejects_a_missing_counts_block(
         self, client: flask.testing.FlaskClient, auth_headers: dict
     ) -> None:
         payload = copy.deepcopy(VALID_PAYLOAD)
         del payload["counts"]
-        assert _put(client, auth_headers, payload).status_code == 400
+        assert _put(client, auth_headers, payload).status_code == http.HTTPStatus.BAD_REQUEST
 
     def test_rejects_never_run_above_skipped(
         self, client: flask.testing.FlaskClient, auth_headers: dict
     ) -> None:
         """never_run is a subset of skipped - the registration files are skips."""
-        response = _put(client, auth_headers, _payload(quality={"never_run": 254}))
-        assert response.status_code == 400
+        response = _put(client, auth_headers, _payload(quality={"never_run": TOTAL_SKIPPED + 1}))
+
+        assert response.status_code == http.HTTPStatus.BAD_REQUEST
         assert "never_run" in response.json["message"]
 
     def test_accepts_never_run_equal_to_skipped(
         self, client: flask.testing.FlaskClient, auth_headers: dict
     ) -> None:
         """An entirely interrupted run: every skip is a test that never ran."""
-        assert _put(client, auth_headers, _payload(quality={"never_run": 253})).status_code == 200
+        _ok(client, auth_headers, _payload(quality={"never_run": TOTAL_SKIPPED}))
 
-    def test_never_run_defaults_to_zero(
+    def test_quality_is_required(
         self, client: flask.testing.FlaskClient, auth_headers: dict
     ) -> None:
+        """Defaulting never_run to 0 would claim an interrupted run was complete."""
         payload = copy.deepcopy(VALID_PAYLOAD)
         del payload["quality"]
-        assert _put(client, auth_headers, payload).status_code == 400
+
+        response = _put(client, auth_headers, payload)
+
+        assert response.status_code == http.HTTPStatus.BAD_REQUEST
+        assert "quality" in response.json["message"]
+
+    @pytest.mark.parametrize("bad", [[], "none", 0])
+    def test_rejects_a_non_object_quality(
+        self, client: flask.testing.FlaskClient, auth_headers: dict, bad: object
+    ) -> None:
+        """Falsy non-dicts must report the type error, not a confusing field error."""
+        response = _put(client, auth_headers, _payload(quality=bad))
+
+        assert response.status_code == http.HTTPStatus.BAD_REQUEST
+        assert "non-object field 'quality'" in response.json["message"]
 
     @pytest.mark.parametrize("bad", [-1.0, "fast", None, True])
     def test_rejects_a_bad_duration(
-        self, client: flask.testing.FlaskClient, auth_headers: dict, bad: Any
+        self, client: flask.testing.FlaskClient, auth_headers: dict, bad: object
     ) -> None:
-        assert _put(client, auth_headers, _payload(duration=bad)).status_code == 400
+        assert (
+            _put(client, auth_headers, _payload(duration=bad)).status_code
+            == http.HTTPStatus.BAD_REQUEST
+        )
 
     @pytest.mark.parametrize("bad", ["0", 1.5, None, True])
     def test_rejects_a_bad_exit_code(
-        self, client: flask.testing.FlaskClient, auth_headers: dict, bad: Any
+        self, client: flask.testing.FlaskClient, auth_headers: dict, bad: object
     ) -> None:
-        assert _put(client, auth_headers, _payload(exit_code=bad)).status_code == 400
+        assert (
+            _put(client, auth_headers, _payload(exit_code=bad)).status_code
+            == http.HTTPStatus.BAD_REQUEST
+        )
+
+    def test_rejects_an_out_of_range_exit_code(
+        self, client: flask.testing.FlaskClient, auth_headers: dict
+    ) -> None:
+        response = _put(client, auth_headers, _payload(exit_code=stats_api.MAX_SQLITE_INT + 1))
+
+        assert response.status_code == http.HTTPStatus.BAD_REQUEST
+        assert "out of range" in response.json["message"]
 
     def test_accepts_a_nonzero_exit_code(
         self, client: flask.testing.FlaskClient, auth_headers: dict
     ) -> None:
-        assert _put(client, auth_headers, _payload(exit_code=1)).status_code == 200
+        _ok(client, auth_headers, _payload(exit_code=1))
 
     @pytest.mark.parametrize("bad", ["yesterday", "", 20260531, None])
     def test_rejects_a_bad_timestamp(
-        self, client: flask.testing.FlaskClient, auth_headers: dict, bad: Any
+        self, client: flask.testing.FlaskClient, auth_headers: dict, bad: object
     ) -> None:
-        assert _put(client, auth_headers, _payload(timestamp=bad)).status_code == 400
+        assert (
+            _put(client, auth_headers, _payload(timestamp=bad)).status_code
+            == http.HTTPStatus.BAD_REQUEST
+        )
+
+    @pytest.mark.parametrize(
+        "bad", ["9999-12-31T23:59:59.999999-23:59", "0001-01-01T00:00:00+23:59"]
+    )
+    def test_rejects_a_timestamp_that_overflows_on_conversion(
+        self, app: flask.Flask, client: flask.testing.FlaskClient, auth_headers: dict, bad: str
+    ) -> None:
+        """Fromisoformat accepts +/-24h offsets, so a near-limit year overflows.
+
+        Unhandled this escapes as Werkzeug's HTML 500 and breaks the
+        JSON-error contract the rest of the service keeps.
+        """
+        response = _put(client, auth_headers, _payload(timestamp=bad))
+
+        assert response.status_code == http.HTTPStatus.BAD_REQUEST
+        assert response.content_type.startswith("application/json")
+        assert _row_count(app) == 0
+
+    @pytest.mark.parametrize("bad", ["0001-01-01T00:00:00+00:00", "0999-12-31T00:00:00+00:00"])
+    def test_rejects_a_year_the_storage_format_cannot_read_back(
+        self, app: flask.Flask, client: flask.testing.FlaskClient, auth_headers: dict, bad: str
+    ) -> None:
+        """strftime("%Y") does not zero-pad but strptime("%Y") needs four digits.
+
+        Such a row would be counted by GET /stats and invisible to
+        GET /stats/runs, so the two routes would disagree forever.
+        """
+        response = _put(client, auth_headers, _payload(timestamp=bad))
+
+        assert response.status_code == http.HTTPStatus.BAD_REQUEST
+        assert "storable range" in response.json["message"]
+        assert _row_count(app) == 0
+
+    def test_every_stored_run_is_readable_back(
+        self, client: flask.testing.FlaskClient, auth_headers: dict
+    ) -> None:
+        """The totals and the listing must never disagree on the row count."""
+        _ok(client, auth_headers, _payload(timestamp=_now_iso()))
+
+        totals = client.get("/stats", headers=auth_headers).json
+        listed = client.get("/stats/runs", headers=auth_headers).json
+
+        assert totals["runs"] == len(listed)
 
     def test_rejects_a_non_boolean_filtered(
         self, client: flask.testing.FlaskClient, auth_headers: dict
     ) -> None:
-        assert _put(client, auth_headers, _payload(filtered="yes")).status_code == 400
+        assert (
+            _put(client, auth_headers, _payload(filtered="yes")).status_code
+            == http.HTTPStatus.BAD_REQUEST
+        )
 
     def test_a_rejected_upload_stores_nothing(
         self, app: flask.Flask, client: flask.testing.FlaskClient, auth_headers: dict
     ) -> None:
-        assert _put(client, auth_headers, _payload(schema=99)).status_code == 400
-
-        with app.app_context():
-            conn = flask_db.get_db()
-            count = conn.execute("SELECT COUNT(*) FROM testrun_stats").fetchone()[0]
-        assert count == 0
+        assert _put(client, auth_headers, _payload(schema=99)).status_code == (
+            http.HTTPStatus.BAD_REQUEST
+        )
+        assert _row_count(app) == 0
 
 
 class TestTotals:
@@ -362,127 +576,257 @@ class TestTotals:
     ) -> None:
         response = client.get("/stats", headers=auth_headers)
 
-        assert response.status_code == 200
+        assert response.status_code == http.HTTPStatus.OK
         assert response.json["runs"] == 0
         assert response.json["cases"] == 0
 
-    def test_sums_across_runs(
-        self, client: flask.testing.FlaskClient, auth_headers: dict
-    ) -> None:
-        for run_id in ("1", "2", "3"):
-            assert _put(client, auth_headers, _payload(run_id=run_id)).status_code == 200
+    def test_sums_across_runs(self, client: flask.testing.FlaskClient, auth_headers: dict) -> None:
+        for run_id in RUN_IDS:
+            _ok(client, auth_headers, _payload(run_id=run_id))
 
         totals = client.get("/stats", headers=auth_headers).json
 
-        assert totals["runs"] == 3
-        assert totals["cases"] == 2145 * 3
-        assert totals["passed"] == 1892 * 3
-        assert totals["duration"] == pytest.approx(4527.316 * 3)
+        assert totals["runs"] == len(RUN_IDS)
+        assert totals["cases"] == TOTAL_CASES * len(RUN_IDS)
+        assert totals["passed"] == TOTAL_PASSED * len(RUN_IDS)
+        assert totals["duration"] == pytest.approx(TOTAL_DURATION * len(RUN_IDS))
+
+    def test_reports_never_run(self, client: flask.testing.FlaskClient, auth_headers: dict) -> None:
+        """Without it a caller cannot tell interrupted runs were summed in."""
+        _ok(client, auth_headers, _payload(quality={"never_run": TOTAL_SKIPPED}))
+
+        assert client.get("/stats", headers=auth_headers).json["never_run"] == TOTAL_SKIPPED
 
     def test_narrows_by_project(
         self, client: flask.testing.FlaskClient, auth_headers: dict
     ) -> None:
-        assert _put(client, auth_headers, VALID_PAYLOAD).status_code == 200
-        assert _put(client, auth_headers, _payload(project="cardano-sync-tests")).status_code == 200
+        _ok(client, auth_headers, VALID_PAYLOAD)
+        _ok(client, auth_headers, _payload(project="cardano-sync-tests"))
 
         totals = client.get("/stats?project=cardano-sync-tests", headers=auth_headers).json
 
         assert totals["runs"] == 1
         assert totals["project"] == "cardano-sync-tests"
 
-    def test_day_window_excludes_older_runs(
-        self, app: flask.Flask, client: flask.testing.FlaskClient, auth_headers: dict
+    def test_day_window_includes_a_recent_run(
+        self, client: flask.testing.FlaskClient, auth_headers: dict
     ) -> None:
-        assert _put(client, auth_headers, VALID_PAYLOAD).status_code == 200
-        # The payload's own timestamp is 2026-05-31, well outside any window
-        # a dashboard would ask for.
+        """Without this, a window that matched nothing would pass every other test."""
+        _ok(client, auth_headers, _payload(timestamp=_now_iso()))
+
+        assert client.get("/stats?days=7", headers=auth_headers).json["runs"] == 1
+
+    def test_day_window_excludes_an_older_run(
+        self, client: flask.testing.FlaskClient, auth_headers: dict
+    ) -> None:
+        old = (datetime.now(UTC) - timedelta(days=30)).isoformat()
+        _ok(client, auth_headers, _payload(timestamp=old))
+
         assert client.get("/stats?days=7", headers=auth_headers).json["runs"] == 0
         assert client.get("/stats", headers=auth_headers).json["runs"] == 1
+
+    def test_day_window_keeps_a_run_just_inside_it(
+        self, client: flask.testing.FlaskClient, auth_headers: dict
+    ) -> None:
+        recent = (datetime.now(UTC) - timedelta(days=6)).isoformat()
+        _ok(client, auth_headers, _payload(timestamp=recent))
+
+        assert client.get("/stats?days=7", headers=auth_headers).json["runs"] == 1
 
     @pytest.mark.parametrize("bad", ["x", "0", "-5", "400"])
     def test_rejects_a_bad_day_window(
         self, client: flask.testing.FlaskClient, auth_headers: dict, bad: str
     ) -> None:
-        assert client.get(f"/stats?days={bad}", headers=auth_headers).status_code == 400
+        response = client.get(f"/stats?days={bad}", headers=auth_headers)
+
+        assert response.status_code == http.HTTPStatus.BAD_REQUEST
+        assert "days" in response.json["message"]
 
     def test_rejects_an_unusable_project_filter(
         self, client: flask.testing.FlaskClient, auth_headers: dict
     ) -> None:
-        assert client.get("/stats?project=../etc", headers=auth_headers).status_code == 400
+        response = client.get("/stats?project=../etc", headers=auth_headers)
+
+        assert response.status_code == http.HTTPStatus.BAD_REQUEST
+        assert "Invalid path segment" in response.json["message"]
 
 
 class TestListRuns:
     def test_lists_newest_first(
         self, client: flask.testing.FlaskClient, auth_headers: dict
     ) -> None:
-        assert _put(
-            client, auth_headers, _payload(run_id="old", timestamp="2026-01-01T00:00:00+00:00")
-        ).status_code == 200
-        assert _put(
-            client, auth_headers, _payload(run_id="new", timestamp="2026-02-01T00:00:00+00:00")
-        ).status_code == 200
+        _ok(client, auth_headers, _payload(run_id="old", timestamp="2026-01-01T00:00:00+00:00"))
+        _ok(client, auth_headers, _payload(run_id="new", timestamp="2026-02-01T00:00:00+00:00"))
 
         runs = client.get("/stats/runs", headers=auth_headers).json
 
         assert [r["run_id"] for r in runs] == ["new", "old"]
 
+    def test_day_window_applies_to_the_listing_too(
+        self, client: flask.testing.FlaskClient, auth_headers: dict
+    ) -> None:
+        _ok(client, auth_headers, _payload(run_id="recent", timestamp=_now_iso()))
+        old = (datetime.now(UTC) - timedelta(days=30)).isoformat()
+        _ok(client, auth_headers, _payload(run_id="old", timestamp=old))
+
+        runs = client.get("/stats/runs?days=7", headers=auth_headers).json
+
+        assert [r["run_id"] for r in runs] == ["recent"]
+
     def test_limit_caps_the_listing(
         self, client: flask.testing.FlaskClient, auth_headers: dict
     ) -> None:
-        for run_id in ("1", "2", "3"):
-            assert _put(client, auth_headers, _payload(run_id=run_id)).status_code == 200
+        for run_id in RUN_IDS:
+            _ok(client, auth_headers, _payload(run_id=run_id))
 
-        assert len(client.get("/stats/runs?limit=2", headers=auth_headers).json) == 2
+        listed = client.get(f"/stats/runs?limit={LIMIT_BELOW_ROW_COUNT}", headers=auth_headers).json
+        assert len(listed) == LIMIT_BELOW_ROW_COUNT
 
-    def test_does_not_expose_the_raw_payload(
+    def test_does_not_expose_the_stored_payload(
         self, client: flask.testing.FlaskClient, auth_headers: dict
     ) -> None:
         """The listing is summary only - a future public page reads from here."""
-        assert _put(client, auth_headers, VALID_PAYLOAD).status_code == 200
+        _ok(client, auth_headers, VALID_PAYLOAD)
 
         run = client.get("/stats/runs", headers=auth_headers).json[0]
 
         assert "payload" not in run
+        assert "versions" not in run
+        assert "commands" not in run
 
     @pytest.mark.parametrize("bad", ["x", "0", "-1"])
     def test_rejects_a_bad_limit(
         self, client: flask.testing.FlaskClient, auth_headers: dict, bad: str
     ) -> None:
-        assert client.get(f"/stats/runs?limit={bad}", headers=auth_headers).status_code == 400
+        response = client.get(f"/stats/runs?limit={bad}", headers=auth_headers)
+
+        assert response.status_code == http.HTTPStatus.BAD_REQUEST
+        assert "limit" in response.json["message"]
+
+    def test_refuses_a_limit_above_the_cap_rather_than_truncating(
+        self, client: flask.testing.FlaskClient, auth_headers: dict
+    ) -> None:
+        """There is no cursor, so a silently clamped listing looks complete."""
+        response = client.get(
+            f"/stats/runs?limit={stats_cache.MAX_LIST_ROWS + 1}", headers=auth_headers
+        )
+
+        assert response.status_code == http.HTTPStatus.BAD_REQUEST
+        assert str(stats_cache.MAX_LIST_ROWS) in response.json["message"]
+
+
+class TestStorageFailures:
+    def test_a_busy_database_asks_the_caller_to_retry(
+        self, client: flask.testing.FlaskClient, auth_headers: dict, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A concurrent writer elsewhere in the service is transient, not a failure."""
+        exc = sqlite3.OperationalError("database is locked")
+        exc.sqlite_errorcode = sqlite3.SQLITE_BUSY
+
+        def _busy(**_kwargs: object) -> None:
+            raise exc
+
+        monkeypatch.setattr(stats_api.stats_cache, "save_testrun_stats", _busy)
+
+        response = _put(client, auth_headers, VALID_PAYLOAD)
+
+        assert response.status_code == http.HTTPStatus.SERVICE_UNAVAILABLE
+        assert response.headers["Retry-After"] == "5"
+        assert response.json["message"] == "Server busy, try again"
+
+    def test_a_wal_busy_snapshot_is_also_transient(
+        self, client: flask.testing.FlaskClient, auth_headers: dict, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The extended code under WAL is 517; an equality test would miss it."""
+        exc = sqlite3.OperationalError("database is locked")
+        exc.sqlite_errorcode = 517
+
+        def _busy(**_kwargs: object) -> None:
+            raise exc
+
+        monkeypatch.setattr(stats_api.stats_cache, "save_testrun_stats", _busy)
+
+        response = _put(client, auth_headers, VALID_PAYLOAD)
+
+        assert response.status_code == http.HTTPStatus.SERVICE_UNAVAILABLE
+
+    def test_a_hard_db_error_is_reported_as_json(
+        self, client: flask.testing.FlaskClient, auth_headers: dict, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def _boom(**_kwargs: object) -> None:
+            msg = "disk I/O error"
+            raise sqlite3.DatabaseError(msg)
+
+        monkeypatch.setattr(stats_api.stats_cache, "save_testrun_stats", _boom)
+
+        response = _put(client, auth_headers, VALID_PAYLOAD)
+
+        assert response.status_code == http.HTTPStatus.INTERNAL_SERVER_ERROR
+        assert response.json["message"] == "Failed to store testrun stats"
+
+    def test_a_failed_upload_stores_nothing(
+        self, app: flask.Flask, client: flask.testing.FlaskClient, auth_headers: dict
+    ) -> None:
+        """A commit failure must not leave a half-written row behind."""
+        original = stats_api.stats_cache.save_testrun_stats
+
+        def _save_then_fail(**kwargs: object) -> None:
+            original(**kwargs)  # type: ignore[arg-type]
+            msg = "commit refused"
+            raise sqlite3.DatabaseError(msg)
+
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(stats_api.stats_cache, "save_testrun_stats", _save_then_fail)
+            assert _put(client, auth_headers, VALID_PAYLOAD).status_code == (
+                http.HTTPStatus.INTERNAL_SERVER_ERROR
+            )
+
+        assert _row_count(app) == 0
 
 
 class TestReadFailures:
     def test_totals_report_a_db_error_as_json(
-        self,
-        app: flask.Flask,
-        client: flask.testing.FlaskClient,
-        auth_headers: dict,
-        monkeypatch: pytest.MonkeyPatch,
+        self, client: flask.testing.FlaskClient, auth_headers: dict, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """An unrun migration must not break the JSON-error contract."""
 
-        def _boom(*_args: Any, **_kwargs: Any) -> None:
-            raise sqlite3.OperationalError("no such table: testrun_stats")
+        def _boom(**_kwargs: object) -> None:
+            msg = "no such table: testrun_stats"
+            raise sqlite3.OperationalError(msg)
 
         monkeypatch.setattr(stats_api.stats_cache, "get_totals", _boom)
 
         response = client.get("/stats", headers=auth_headers)
 
-        assert response.status_code == 500
+        assert response.status_code == http.HTTPStatus.INTERNAL_SERVER_ERROR
         assert response.json["message"] == "Failed to read testrun stats"
 
     def test_listing_reports_a_db_error_as_json(
-        self,
-        client: flask.testing.FlaskClient,
-        auth_headers: dict,
-        monkeypatch: pytest.MonkeyPatch,
+        self, client: flask.testing.FlaskClient, auth_headers: dict, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        def _boom(*_args: Any, **_kwargs: Any) -> None:
-            raise sqlite3.OperationalError("no such table: testrun_stats")
+        def _boom(**_kwargs: object) -> None:
+            msg = "no such table: testrun_stats"
+            raise sqlite3.OperationalError(msg)
 
         monkeypatch.setattr(stats_api.stats_cache, "list_testrun_stats", _boom)
 
         response = client.get("/stats/runs", headers=auth_headers)
 
-        assert response.status_code == 500
+        assert response.status_code == http.HTTPStatus.INTERNAL_SERVER_ERROR
         assert response.json["message"] == "Failed to read testrun stats"
+
+    def test_a_malformed_stored_timestamp_is_skipped_not_fatal(
+        self, app: flask.Flask, client: flask.testing.FlaskClient, auth_headers: dict
+    ) -> None:
+        """One corrupt row must not hide every other run from the listing."""
+        _ok(client, auth_headers, _payload(run_id="good", timestamp=_now_iso()))
+        _ok(client, auth_headers, _payload(run_id="bad", timestamp=_now_iso()))
+
+        with app.app_context():
+            conn = flask_db.get_db()
+            conn.execute("UPDATE testrun_stats SET timestamp = 'nonsense' WHERE run_id = 'bad'")
+            conn.commit()
+
+        runs: List[dict] = client.get("/stats/runs", headers=auth_headers).json
+
+        assert [r["run_id"] for r in runs] == ["good"]

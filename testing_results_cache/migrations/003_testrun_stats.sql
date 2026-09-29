@@ -61,7 +61,8 @@ CREATE TABLE IF NOT EXISTS testrun_stats (
     exit_code INTEGER NOT NULL,
     filtered INTEGER NOT NULL,
 
-    -- The uploaded JSON, stored verbatim. About 600 bytes per run. It holds
+    -- The uploaded JSON, re-serialised canonically (values all survive; key
+    -- order and whitespace do not). About 600 bytes per run. It holds
     -- the fields no column exists for yet (versions, env, CLI coverage) and
     -- the client-side warning counters, so a later column can be backfilled
     -- instead of losing every run recorded before it.
