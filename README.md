@@ -236,6 +236,138 @@ Download the stored zip for a version:
 curl -u username:password http://localhost:5000/sync-results/11.1.0/zip
 ```
 
+## Per-run test statistics
+
+Separate again from `/results` and `/history`, and for a specific reason: JUnit
+is a standardised format and cannot carry the metadata these counts need
+(software versions, CLI command coverage) without breaking its schema.
+`/results/.../import` parses JUnit and stores verdicts, `/history` stores raw
+JUnit and parses nothing, and this endpoint stores numbers the client already
+computed. **The service never parses a test report here.**
+
+The client does the counting because the source is allure, not JUnit.
+`cardano-node-tests` runs pytest twice into one results directory (a
+`--skipall` registration pass, then the real run), so result files have to be
+grouped by allure `historyId` before anything is counted. That logic lives in
+`scripts/count_test_results.py` in that repo.
+
+A run is identified by five fields together: `project`, `testrun_name`,
+`run_id`, `step` and `origin`. All five are needed - `run_id` repeats across
+projects, the upgrade path reports three `step`s under one run, and `origin`
+(`ci` or `local`) keeps a developer's local run out of the CI numbers.
+Re-uploading the same five replaces the row rather than adding one, so the
+uploader is safe to retry.
+
+### Authentication
+
+The same HTTP basic auth as every other route. The "token" is the password
+half of the credentials pair, so no separate token store exists:
+
+```sh
+flask --app testing_results_cache.app:create_app add-user --username stats
+```
+
+Put `stats:<token>` in CI secrets, and export it locally for a local test run.
+Revoke by deleting the row from the `users` table.
+
+### Upload the counts for one run
+
+The whole identity lives in the body, not the URL, so the two cannot disagree.
+
+```sh
+curl -X PUT --fail-with-body -u stats:token http://localhost:5000/stats \
+  -H 'Content-Type: application/json' -d '{
+  "schema": 1,
+  "project": "cardano-node-tests",
+  "testrun_name": "node-10.5.0",
+  "run_id": "1234",
+  "step": "main",
+  "origin": "ci",
+  "timestamp": "2026-05-31T00:39:35+01:00",
+  "duration": 4527.316,
+  "exit_code": 0,
+  "filtered": false,
+  "counts": {"total": 2145, "passed": 1892, "failed": 0, "broken": 0, "skipped": 253},
+  "quality": {"never_run": 0, "no_history_id": 0, "read_errors": 0},
+  "versions": {"cardano_node": "10.5.0"},
+  "commands": {"count": 213130, "coverage_pct": 31.01}
+}'
+```
+
+Notes on the fields:
+
+- `counts` holds allure statuses. `broken` has no JUnit equivalent. The four
+  buckets may sum to less than `total`; the remainder is reported back as
+  `other` and needs no column.
+- `quality.never_run` counts tests the registration pass registered that never
+  got a real result, which means the run was interrupted and every count is a
+  floor rather than a total. It is a **subset of `skipped`**, because a
+  registration result carries status `skipped`, and an upload where it exceeds
+  `skipped` is refused. `quality` is **required**: defaulting `never_run` to
+  zero would silently claim an interrupted run was complete, which is the one
+  thing the field exists to prevent.
+- `step` defaults to `main` when absent. The upgrade path sends `step1`,
+  `step2`, `step3`.
+- `timestamp` is ISO-8601. A value without an offset is read as UTC. Years
+  before 1000 are refused, because the stored format cannot read them back.
+- Each count is capped at 10,000,000, which is about 4600x the largest real
+  run. The cap is not about one upload: the counts are summed across rows, and
+  a per-field bound alone would let two individually legal rows overflow
+  `SUM()` and break every read permanently.
+- No number anywhere in the document may be non-finite. `NaN`, `Infinity` and
+  `-Infinity` are refused, and so is a literal like `1e400` that overflows to
+  infinity. Python's JSON parser accepts all of them; the format does not.
+- `duration` is capped at 1,000,000,000 seconds, about 31 years. Like the
+  count cap, this is not about one upload: durations are summed across rows,
+  and a float sum reaches infinity silently rather than failing, which would
+  leave the totals unreadable.
+- Anything else in the document is stored and handed back only by the
+  database, not by the read routes. That is where `versions` and `commands`
+  live until a query needs them as columns. The stored document is
+  re-serialised canonically as UTF-8, so the values all survive but key order
+  and whitespace do not, and the stored form is never larger than the request
+  that carried it.
+- The body is capped at 64 kB, well under the service-wide 16 MB limit.
+
+### Read the totals
+
+```sh
+curl -u stats:token 'http://localhost:5000/stats?project=cardano-node-tests&days=30'
+```
+
+`project`, `days` and `origin` are all optional. `days` must be between 1 and
+366. `origin` must be `ci` or `local`; an unknown value is refused rather than
+returning an empty result.
+
+Use `origin` to keep a developer's local run out of the CI numbers:
+
+```sh
+curl -u stats:token 'http://localhost:5000/stats?origin=ci'
+```
+
+The response sums `runs`, `cases`, `passed`, `failed`, `broken`, `skipped`,
+`never_run` and `duration`, and reports `other` the same way the per-run
+listing does. A non-zero `never_run` means interrupted runs were
+included, so the other totals are a floor rather than a total.
+
+### List individual runs, newest first
+
+```sh
+curl -u stats:token 'http://localhost:5000/stats/runs?project=cardano-node-tests&limit=20'
+```
+
+The listing is summary only. It never returns test names, failure messages or
+the stored document, so it stays safe to build a summary page on.
+
+`limit` must be between 1 and 1000. A larger value is refused rather than
+quietly capped: there is no cursor on this route, so a truncated listing would
+otherwise look complete. `origin` works here too.
+
+A run is `ci` when the uploader saw `GITHUB_ACTIONS` set, and `local`
+otherwise. Together with `project`, `testrun_name`, `run_id` and `step` it
+forms the run's identity, so a local run can never overwrite a CI run even if
+a developer reuses the CI testrun name.
+
 ## Run tests
 
 ```sh
