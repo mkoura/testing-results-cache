@@ -97,18 +97,7 @@ class TestTimestamp:
         assert data.timestamp == datetime(2026, 8, 5, 1, 0, 0, tzinfo=UTC)
 
     def test_a_non_utc_offset_is_converted_to_utc(self, tmp_path: Path) -> None:
-        """Was pinned as a known limitation. Changed deliberately, 2026-09-21.
-
-        The old note read: "Only `+00:00` is stripped, so a report written in
-        another timezone raises. Runners are UTC, which is why this has never
-        bitten." That last clause is what changed. The stats endpoint accepts
-        reports from developer machines, which are not UTC, so the limitation
-        moved from harmless to blocking.
-
-        `_parse_junit_timestamp` now uses `datetime.fromisoformat`. This also
-        means `/import` accepts uploads it used to reject with
-        "Failed to import testrun".
-        """
+        """Convert a report written in another timezone to UTC."""
         junit_file = _write(
             tmp_path, _suite(_case("test_a"), timestamp="2026-08-05T01:00:00.000000+01:00")
         )
@@ -116,7 +105,7 @@ class TestTimestamp:
         assert data.timestamp == datetime(2026, 8, 5, 0, 0, 0, tzinfo=UTC)
 
     def test_a_whole_second_timestamp_is_handled(self, tmp_path: Path) -> None:
-        """Pytest omits `.%f` when the microsecond is zero, via isoformat()."""
+        """Accept a timestamp without microseconds, as pytest writes it."""
         junit_file = _write(
             tmp_path, _suite(_case("test_a"), timestamp="2026-08-05T01:00:00+00:00")
         )
@@ -127,20 +116,14 @@ class TestTimestamp:
         "bad", ["0001-01-01T00:00:00+23:59", "9999-12-31T23:59:59.999999-23:59"]
     )
     def test_an_out_of_range_timestamp_raises_value_error(self, tmp_path: Path, bad: str) -> None:
-        """`fromisoformat` accepts +/-24h offsets, so a year at either end overflows.
-
-        It must surface as ValueError, which is what `/import` catches to
-        answer 400. As OverflowError it escapes as an unhandled 500 with an
-        HTML body, breaking the JSON-error contract. The fixed format this
-        replaced raised ValueError for the same input.
-        """
+        """Raise ValueError, not OverflowError, for a year at either end of the range."""
         junit_file = _write(tmp_path, _suite(_case("test_a"), timestamp=bad))
 
         with pytest.raises(ValueError, match="out of range"):
             junittools.get_testsuite_data(junit_file=junit_file)
 
     def test_a_real_pytest_report_from_a_non_utc_machine_is_accepted(self, tmp_path: Path) -> None:
-        """The exact shape a local run in BST produces, which used to be rejected."""
+        """Accept the timestamp a local run in BST produces."""
         junit_file = _write(
             tmp_path, _suite(_case("test_a"), timestamp="2026-05-31T00:39:35.624341+01:00")
         )
