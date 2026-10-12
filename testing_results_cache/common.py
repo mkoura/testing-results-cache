@@ -109,3 +109,87 @@ class SyncResultsEntry(NamedTuple):
 
     version: str
     timestamp: datetime
+
+
+class TestrunStatsEntry(NamedTuple):
+    """Counts for one test run, as uploaded by the client.
+
+    Attributes:
+        project: The repository the testrun belongs to.
+        testrun_name: The name the testrun was reported under.
+        run_id: The CI run number, or a generated id for a local run.
+        step: The step name, `main` unless this is upgrade testing.
+        origin: `ci` or `local`.
+        timestamp: When the testrun started, tz-aware UTC.
+        cases: Total tests after grouping.
+        passed: Tests with allure status `passed`.
+        failed: Tests with allure status `failed`.
+        broken: Tests with allure status `broken`.
+        skipped: Tests with allure status `skipped`.
+        never_run: Registered tests that never got a real result. A subset
+            of `skipped`. Above zero means the run was interrupted.
+        duration: Wall clock span of the testrun, in seconds.
+        exit_code: pytest's own exit code.
+        filtered: True when the run covered only a subset of the tests.
+        payload: The uploaded JSON document, re-serialised canonically.
+    """
+
+    project: str
+    testrun_name: str
+    run_id: str
+    step: str
+    origin: str
+    timestamp: datetime
+    cases: int
+    passed: int
+    failed: int
+    broken: int
+    skipped: int
+    never_run: int
+    duration: float
+    exit_code: int
+    filtered: bool
+    payload: str
+
+    @property
+    def other(self) -> int:
+        """Tests whose status was none of the four allure statuses.
+
+        Returns:
+            `cases` minus the four status buckets.
+        """
+        return self.cases - self.passed - self.failed - self.broken - self.skipped
+
+
+class TestrunStatsTotals(NamedTuple):
+    """Sums across a set of runs.
+
+    Attributes:
+        runs: How many rows were summed.
+        cases: Total tests across those runs.
+        passed: Tests with allure status `passed`.
+        failed: Tests with allure status `failed`.
+        broken: Tests with allure status `broken`.
+        skipped: Tests with allure status `skipped`.
+        never_run: Registered tests that never got a real result. Above zero
+            means interrupted runs are included.
+        duration: Summed wall clock time, in seconds.
+    """
+
+    runs: int
+    cases: int
+    passed: int
+    failed: int
+    broken: int
+    skipped: int
+    never_run: int
+    duration: float
+
+    @property
+    def other(self) -> int:
+        """Tests whose status was none of the four allure statuses.
+
+        Returns:
+            `cases` minus the four status buckets.
+        """
+        return self.cases - self.passed - self.failed - self.broken - self.skipped

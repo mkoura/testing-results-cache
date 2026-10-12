@@ -25,8 +25,8 @@ from testing_results_cache import migrations_runner
 from testing_results_cache import retention
 
 DAYS_KEPT = 30
-# The two migrations this repo ships.
-SHIPPED_MIGRATIONS = 2
+# The three migrations this repo ships.
+SHIPPED_MIGRATIONS = 3
 
 
 def _run(app: flask.Flask, command: click.Command, *args: str) -> Result:
@@ -88,7 +88,7 @@ class TestMigrateCommand:
 
         again = _run(app, flask_db.migrate_command)
         assert again.exit_code == 0, again.output
-        assert "Up to date at version 2." in again.output
+        assert f"Up to date at version {SHIPPED_MIGRATIONS}." in again.output
         assert "Applied" not in again.output
 
     def test_a_database_ahead_of_the_code_is_a_clean_error(self, app: flask.Flask) -> None:
@@ -199,4 +199,4 @@ class TestInitDbAgreesWithTheMigrations:
         result = _run(app, flask_db.migrate_command)
 
         assert result.exit_code == 0, result.output
-        assert "Up to date at version 2." in result.output
+        assert f"Up to date at version {SHIPPED_MIGRATIONS}." in result.output

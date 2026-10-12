@@ -236,6 +236,57 @@ Download the stored zip for a version:
 curl -u username:password http://localhost:5000/sync-results/11.1.0/zip
 ```
 
+## Per-run test statistics
+
+Stores the test counts for one run, as a small JSON document that the client
+computes from its allure results. No test report is parsed here. A run is
+identified by `project`, `testrun_name`, `run_id`, `step` and `origin`
+together. A re-upload with the same five fields replaces the row.
+
+Create a user for the uploader. The password is the token:
+
+```sh
+flask --app testing_results_cache.app:create_app add-user --username stats
+```
+
+Upload the counts for one run:
+
+```sh
+curl -X PUT --fail-with-body -u stats:token http://localhost:5000/stats \
+  -H 'Content-Type: application/json' -d '{
+  "schema": 1,
+  "project": "cardano-node-tests",
+  "testrun_name": "node-10.5.0",
+  "run_id": "1234",
+  "step": "main",
+  "origin": "ci",
+  "timestamp": "2026-05-31T00:39:35+01:00",
+  "duration": 4527.316,
+  "exit_code": 0,
+  "filtered": false,
+  "counts": {"total": 2145, "passed": 1892, "failed": 0, "broken": 0, "skipped": 253},
+  "quality": {"never_run": 0, "no_history_id": 0, "read_errors": 0},
+  "versions": {"cardano_node": "10.5.0"},
+  "commands": {"count": 213130, "coverage_pct": 31.01}
+}'
+```
+
+`step` defaults to `main`. `quality.never_run` is required and is a subset of
+`skipped`. Other fields are stored but not returned. The body is capped at
+64 kB.
+
+Read the totals, or list the runs newest first. `project`, `origin` (`ci` or
+`local`) and `days` (1 to 366) are optional filters on both routes.
+`/stats/runs` also takes `limit` (1 to 1000):
+
+```sh
+curl -u stats:token 'http://localhost:5000/stats?project=cardano-node-tests&origin=ci&days=30'
+curl -u stats:token 'http://localhost:5000/stats/runs?project=cardano-node-tests&limit=20'
+```
+
+The totals include a derived `other` count. A non-zero `never_run` means
+interrupted runs are included, so the totals are a lower bound.
+
 ## Run tests
 
 ```sh
