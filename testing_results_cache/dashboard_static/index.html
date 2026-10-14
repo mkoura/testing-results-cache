@@ -72,6 +72,43 @@
       <div class="tile"><span class="label">CLI coverage</span><span class="value" id="t-cov">–</span><span class="hint" id="t-cov-hint"></span></div>
     </section>
 
+    <section class="panel impact-panel" id="impact" aria-label="Issues found by our testing" hidden>
+      <div class="impact-head">
+        <h2>Issues found by our testing</h2>
+        <span class="foot">Issues our test engineers opened in the upstream Cardano repositories</span>
+      </div>
+      <div class="impact">
+        <div><b id="i-found">–</b><span>issues found</span></div>
+        <div><b id="i-bugs">–</b><span>of them bugs</span></div>
+        <div><b id="i-open">–</b><span>still open</span></div>
+        <div><b id="i-comp">–</b><span>components</span></div>
+      </div>
+      <div class="row2">
+        <div>
+          <h2>Issues found, running total</h2>
+          <div id="chart-issues" role="img" aria-label="Running total of issues found by our testing"></div>
+        </div>
+        <div>
+          <h2>By component</h2>
+          <ul class="comps" id="comps"></ul>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th scope="col">Opened</th>
+              <th scope="col">Issue</th>
+              <th scope="col">Component</th>
+              <th scope="col">Type</th>
+              <th scope="col">State</th>
+            </tr>
+          </thead>
+          <tbody id="issues"></tbody>
+        </table>
+      </div>
+    </section>
+
     <div class="row2">
       <section class="panel">
         <h2>Test runs per day</h2>

@@ -11,7 +11,6 @@ the database can reach it. Every run is marked `ci` or `local`.
 import fcntl
 import json
 import math
-import os
 import shutil
 import sqlite3
 import typing as tp
@@ -23,7 +22,9 @@ from pathlib import Path
 import click
 import flask
 
+from testing_results_cache import common
 from testing_results_cache import flask_db
+from testing_results_cache import impact as impact_mod
 from testing_results_cache import stats_cache
 
 SCHEMA = 1
@@ -238,12 +239,17 @@ def _releases(conn: sqlite3.Connection) -> tp.List[dict]:
     return sorted(out, key=lambda e: e["last"], reverse=True)
 
 
-def build(conn: sqlite3.Connection, now: tp.Optional[datetime] = None) -> dict:
+def build(
+    conn: sqlite3.Connection,
+    now: tp.Optional[datetime] = None,
+    impact: tp.Optional[dict] = None,
+) -> dict:
     """Build the dashboard document from the database.
 
     Args:
         conn: An open database connection.
         now: The current time, tz-aware UTC. Defaults to the real clock.
+        impact: The impact section from `impact.load_section`, or None.
 
     Returns:
         The document, holding only the fields the dashboard page draws.
@@ -288,7 +294,7 @@ def build(conn: sqlite3.Connection, now: tp.Optional[datetime] = None) -> dict:
         for run in sorted(runs, key=lambda r: r["started"], reverse=True)[:LATEST_RUNS]
     ]
 
-    return {
+    doc = {
         "schema": SCHEMA,
         "generated_at": now.isoformat(),
         "window_days": WINDOW_DAYS,
@@ -302,6 +308,9 @@ def build(conn: sqlite3.Connection, now: tp.Optional[datetime] = None) -> dict:
         "coverage": [{"date": d, "pct": coverage[d]} for d in sorted(coverage)],
         "releases": _releases(conn),
     }
+    if impact is not None:
+        doc["impact"] = impact
+    return doc
 
 
 def write(folder: Path, data: dict) -> None:
@@ -314,15 +323,10 @@ def write(folder: Path, data: dict) -> None:
         folder: The dashboard folder.
         data: The document to write.
     """
-    tmp = folder / TMP_FILE
-    with tmp.open("w", encoding="utf-8") as f:
-        json.dump(data, f, separators=(",", ":"), ensure_ascii=False)
-        f.flush()
-        os.fsync(f.fileno())
-    tmp.replace(folder / DATA_FILE)
+    common.replace_json(folder / DATA_FILE, data)
 
 
-def rebuild(conn: sqlite3.Connection, folder: Path) -> None:
+def rebuild(conn: sqlite3.Connection, folder: Path, impact: tp.Optional[dict] = None) -> None:
     """Rebuild the dashboard file, one rebuild at a time.
 
     The lock makes a second rebuild wait and then read the database again,
@@ -331,11 +335,29 @@ def rebuild(conn: sqlite3.Connection, folder: Path) -> None:
     Args:
         conn: An open database connection.
         folder: The dashboard folder.
+        impact: The impact section from `impact.load_section`, or None.
     """
     folder.mkdir(parents=True, exist_ok=True)
     with (folder / LOCK_FILE).open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        write(folder, build(conn))
+        write(folder, build(conn, impact=impact))
+
+
+def rebuild_for_app(conn: sqlite3.Connection) -> bool:
+    """Rebuild the dashboard file using the app's configuration.
+
+    Args:
+        conn: An open database connection.
+
+    Returns:
+        False when no DASHBOARD_FOLDER is configured, so nothing was done.
+    """
+    config = flask.current_app.config
+    if not config.get("DASHBOARD_FOLDER"):
+        return False
+    impact = impact_mod.load_section(Path(config["IMPACT_FILE"]))
+    rebuild(conn, Path(config["DASHBOARD_FOLDER"]), impact)
+    return True
 
 
 def install_assets(folder: Path) -> None:
@@ -356,7 +378,31 @@ def build_dashboard_command() -> None:
     if not configured:
         msg = "DASHBOARD_FOLDER is not set in the instance config."
         raise click.ClickException(msg)
-    folder = Path(configured)
-    install_assets(folder)
-    rebuild(flask_db.get_db(), folder)
-    click.echo(f"Dashboard written to {folder}.")
+    install_assets(Path(configured))
+    rebuild_for_app(flask_db.get_db())
+    click.echo(f"Dashboard written to {configured}.")
+
+
+@click.command("update-impact")
+def update_impact_command() -> None:
+    """Fetch the issues found by our testing from GitHub, then rebuild the dashboard."""
+    config = flask.current_app.config
+    authors = config.get("IMPACT_AUTHORS") or []
+    if not authors:
+        msg = "IMPACT_AUTHORS is not set in the instance config."
+        raise click.ClickException(msg)
+    try:
+        issues = impact_mod.fetch(
+            authors=authors,
+            owner=config["IMPACT_OWNER"],
+            exclude=config["IMPACT_EXCLUDE_REPOS"],
+            token=config.get("IMPACT_GITHUB_TOKEN"),
+        )
+    except (OSError, ValueError) as err:
+        # The previous impact file stays as it is.
+        msg = f"Could not fetch issues from GitHub: {err}"
+        raise click.ClickException(msg) from err
+    impact_mod.save(Path(config["IMPACT_FILE"]), config["IMPACT_OWNER"], issues)
+    click.echo(f"Stored {len(issues)} issues.")
+    if rebuild_for_app(flask_db.get_db()):
+        click.echo("Dashboard rebuilt.")

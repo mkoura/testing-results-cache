@@ -11,7 +11,6 @@ import sqlite3
 import typing as tp
 from datetime import UTC
 from datetime import datetime
-from pathlib import Path
 
 import flask
 from werkzeug.exceptions import HTTPException
@@ -460,11 +459,8 @@ def _rebuild_dashboard(conn: sqlite3.Connection) -> None:
     Args:
         conn: The connection the upload was stored with.
     """
-    folder = flask.current_app.config.get("DASHBOARD_FOLDER")
-    if not folder:
-        return
     try:
-        dashboard.rebuild(conn, Path(folder))
+        dashboard.rebuild_for_app(conn)
     except Exception:
         flask.current_app.logger.exception("Failed to rebuild the dashboard")
 
