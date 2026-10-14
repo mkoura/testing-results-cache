@@ -11,11 +11,13 @@ import sqlite3
 import typing as tp
 from datetime import UTC
 from datetime import datetime
+from pathlib import Path
 
 import flask
 from werkzeug.exceptions import HTTPException
 
 from testing_results_cache import common
+from testing_results_cache import dashboard
 from testing_results_cache import flask_auth
 from testing_results_cache import flask_db
 from testing_results_cache import stats_cache
@@ -450,6 +452,23 @@ def _entry_dict(entry: common.TestrunStatsEntry) -> dict:
     }
 
 
+def _rebuild_dashboard(conn: sqlite3.Connection) -> None:
+    """Rebuild the public dashboard file, when a dashboard folder is configured.
+
+    A failure is logged and never fails the upload, which is already stored.
+
+    Args:
+        conn: The connection the upload was stored with.
+    """
+    folder = flask.current_app.config.get("DASHBOARD_FOLDER")
+    if not folder:
+        return
+    try:
+        dashboard.rebuild(conn, Path(folder))
+    except Exception:
+        flask.current_app.logger.exception("Failed to rebuild the dashboard")
+
+
 @stats.route("/stats", methods=["PUT", "POST"])
 @flask_auth.auth.login_required
 def upload_stats() -> dict:
@@ -509,6 +528,8 @@ def upload_stats() -> dict:
     except Exception:
         _rollback(conn, run_id)
         _abort_storage_failure(run_id)
+
+    _rebuild_dashboard(conn)
 
     return {
         "project": project,
