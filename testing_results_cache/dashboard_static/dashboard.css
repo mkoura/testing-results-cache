@@ -149,6 +149,14 @@ td.none { color: var(--muted); text-align: center; padding: 18px; }
 .impact div { display: grid; gap: 2px; }
 .impact b { font-size: 30px; font-weight: 700; font-variant-numeric: tabular-nums; color: var(--teal); }
 .impact span { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; }
+.comps { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.comps li { display: grid; grid-template-columns: 150px minmax(0, 1fr) 40px; gap: 8px; align-items: center; font-size: 13px; }
+.comps .bar { display: block; height: 10px; border-radius: 3px; background: var(--teal); }
+.comps .n { text-align: right; font-variant-numeric: tabular-nums; color: var(--muted); }
+.issue-link { color: var(--fg); text-decoration: none; }
+.issue-link:hover { text-decoration: underline; }
+.issue-link .ref { color: var(--muted); font-family: var(--font-num); font-size: 12px; margin-right: 6px; }
+.tag.t-bug { border-color: var(--teal); color: var(--teal); }
 .state { font-size: 11px; padding: 1px 7px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); }
 .state.resolved { border-color: var(--teal); color: var(--teal); }
 .releases { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }

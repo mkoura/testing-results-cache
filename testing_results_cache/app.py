@@ -47,6 +47,13 @@ def create_app() -> flask.Flask:
         SYNC_RESULTS_FOLDER=str(instance_path / "sync_results"),
         # The public dashboard is off until this is set in the instance config.
         DASHBOARD_FOLDER=None,
+        # Issues found by our testing: the GitHub logins whose upstream issues count.
+        # Empty turns the dashboard's impact section off.
+        IMPACT_AUTHORS=[],
+        IMPACT_OWNER="IntersectMBO",
+        IMPACT_EXCLUDE_REPOS=["cardano-node-tests", "cardano-sync-tests"],
+        IMPACT_GITHUB_TOKEN=None,
+        IMPACT_FILE=str(instance_path / "impact.json"),
         MAX_CONTENT_LENGTH=16 * 1000 * 1000,  # 16MB
     )
 
@@ -60,6 +67,7 @@ def create_app() -> flask.Flask:
     app.cli.add_command(flask_db.migrate_command)
     app.cli.add_command(flask_db.prune_history_command)
     app.cli.add_command(dashboard.build_dashboard_command)
+    app.cli.add_command(dashboard.update_impact_command)
 
     app.register_blueprint(results_api.results)
     app.register_blueprint(history_api.history)

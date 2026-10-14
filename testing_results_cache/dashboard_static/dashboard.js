@@ -76,7 +76,7 @@
     const every = Math.ceil(rows.length / 6);
     rows.forEach((r, i) => {
       if (i % every === 0 || i === rows.length - 1) {
-        svg.appendChild(svgEl("text", { class: "tick", x: PAD.l + i * step + step / 2, y: H - 6, "text-anchor": "middle" }, r.date.slice(5)));
+        svg.appendChild(svgEl("text", { class: "tick", x: PAD.l + i * step + step / 2, y: H - 6, "text-anchor": "middle" }, r.label || r.date.slice(5)));
       }
     });
     return step;
@@ -117,7 +117,7 @@
       container.replaceChildren(svg);
       return;
     }
-    const lo = Math.floor(Math.min(...vals) * 0.98);
+    const lo = opts.zero ? 0 : Math.floor(Math.min(...vals) * 0.98);
     const hi = Math.max(niceMax(Math.max(...vals)), lo + 1);
     const step = axes(svg, rows, lo, hi);
     const pts = [];
@@ -181,6 +181,65 @@
     }));
   }
 
+  function renderImpact(impact) {
+    const panel = byId("impact");
+    if (!impact) {
+      panel.hidden = true;
+      return;
+    }
+    panel.hidden = false;
+    byId("i-found").textContent = fmt(impact.found);
+    byId("i-bugs").textContent = fmt(impact.bugs);
+    byId("i-open").textContent = fmt(impact.open);
+    byId("i-comp").textContent = fmt(impact.components.length);
+
+    const maxComp = Math.max(1, ...impact.components.map((c) => c.count));
+    byId("comps").replaceChildren(...impact.components.map((c) => {
+      const li = h("li");
+      const bar = h("span", "bar");
+      bar.style.width = `${(c.count / maxComp) * 100}%`;
+      const track = h("span");
+      track.append(bar);
+      li.append(h("span", "mono", c.repo), track, h("span", "n", fmt(c.count)));
+      return li;
+    }));
+
+    // One point per month from the first issue to the data date; the total only rises.
+    const rows = [];
+    if (impact.months.length) {
+      const perMonth = new Map(impact.months.map((m) => [m.month, m.found]));
+      const end = data.generated_at.slice(0, 7);
+      let [y, m] = impact.months[0].month.split("-").map(Number);
+      let found = 0;
+      for (;;) {
+        const key = `${y}-${String(m).padStart(2, "0")}`;
+        found += perMonth.get(key) || 0;
+        rows.push({ date: `${key}-01`, label: String(y), cumul: found });
+        if (key >= end) break;
+        m += 1;
+        if (m > 12) { m = 1; y += 1; }
+      }
+    }
+    if (rows.length) line(byId("chart-issues"), rows, "cumul", { cls: "lineS", dot: "endpt", area: true, zero: true });
+    else byId("chart-issues").replaceChildren();
+
+    byId("issues").replaceChildren(...impact.latest.map((i) => {
+      const tr = h("tr");
+      const a = h("a", "issue-link");
+      a.href = `https://github.com/${encodeURIComponent(impact.owner)}/${encodeURIComponent(i.repo)}/issues/${Number(i.number)}`;
+      a.rel = "noopener";
+      a.append(h("span", "ref", `#${Number(i.number)}`), document.createTextNode(i.title));
+      const link = h("td");
+      link.append(a);
+      const type = h("td");
+      type.append(h("span", i.bug ? "tag t-bug" : "tag", i.bug ? "Bug" : "Issue"));
+      const state = h("td");
+      state.append(h("span", "state", i.state === "open" ? "Open" : "Closed"));
+      tr.append(h("td", "mono", i.opened), link, h("td", "mono", i.repo), type, state);
+      return tr;
+    }));
+  }
+
   function renderStatic() {
     byId("a-runs").textContent = fmt(data.all_time.runs);
     byId("a-cases").textContent = fmt(data.all_time.tests);
@@ -198,6 +257,7 @@
       return li;
     });
     byId("releases").replaceChildren(...(releases.length ? releases : [h("li", "sub", "No release runs yet")]));
+    renderImpact(data.impact);
   }
 
   function render() {
