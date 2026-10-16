@@ -66,6 +66,27 @@ class FakeGitHub:
         return {"items": pages[page - 1] if page <= len(pages) else []}
 
 
+class LabelledFakeGitHub(FakeGitHub):
+    """Also answer repository and label searches."""
+
+    def __init__(
+        self, authors: tp.Dict[str, tp.List[tp.List[dict]]], labelled: tp.List[tp.List[dict]]
+    ) -> None:
+        """Keep the author pages and the labelled pages."""
+        super().__init__(authors)
+        self.labelled = labelled
+        self.labelled_queries: tp.List[str] = []
+
+    def __call__(self, url: str, token: tp.Optional[str]) -> dict:
+        """Serve labelled pages for a label query, author pages otherwise."""
+        query = dict(urllib.parse.parse_qsl(urllib.parse.urlsplit(url).query))
+        if "label:" not in query["q"]:
+            return super().__call__(url, token)
+        self.labelled_queries.append(query["q"])
+        page = int(query["page"])
+        return {"items": self.labelled[page - 1] if page <= len(self.labelled) else []}
+
+
 class TestFetch:
     """Tests for collecting issues from the search API."""
 
@@ -95,6 +116,24 @@ class TestFetch:
         fake = FakeGitHub({"alice": [[_item("cardano-node", 1), _item("cardano-node-tests", 2)]]})
         issues = impact.fetch(["alice"], OWNER, exclude={"cardano-node-tests"}, get=fake)
         assert [(i["repo"], i["number"]) for i in issues] == [("cardano-node", 1)]
+
+    def test_counts_labelled_issues_from_an_excluded_repo(self) -> None:
+        """Keep an issue with the agreed label, even in our own repo, from any author."""
+        fake = LabelledFakeGitHub(
+            authors={"alice": [[_item("cardano-node-tests", 1)]]},
+            labelled=[[_item("cardano-node-tests", 2)]],
+        )
+        issues = impact.fetch(
+            ["alice"],
+            OWNER,
+            exclude={"cardano-node-tests"},
+            labelled=[("cardano-node-tests", "upstream bug")],
+            get=fake,
+        )
+        assert [i["number"] for i in issues] == [2]
+        assert fake.labelled_queries == [
+            f'is:issue repo:{OWNER}/cardano-node-tests label:"upstream bug"'
+        ]
 
     def test_drops_malformed_results(self) -> None:
         """Skip a result with a missing field or an unexpected value."""

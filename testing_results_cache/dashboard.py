@@ -10,7 +10,6 @@ the database can reach it. Every run is marked `ci` or `local`.
 
 import fcntl
 import json
-import math
 import shutil
 import sqlite3
 import typing as tp
@@ -37,7 +36,7 @@ DATA_FILE = "dashboard.json"
 TMP_FILE = ".dashboard.json.tmp"
 LOCK_FILE = ".dashboard.lock"
 MAX_VERSION_LENGTH = 64
-MAX_PERCENT = 100
+MAX_CLI_COUNT = 10**9
 EXECUTED_SQL = "cases - skipped"
 # Any origin other than "ci" is shown as "local", so no other value reaches the page.
 SOURCE_SQL = "CASE WHEN origin = 'ci' THEN 'ci' ELSE 'local' END"
@@ -89,22 +88,33 @@ def _version(doc: dict) -> tp.Optional[str]:
     return None
 
 
-def _coverage(doc: dict) -> tp.Optional[float]:
-    """Read the CLI coverage percentage from an upload document.
+def _count(value: object) -> int:
+    """Read a CLI count from an upload document.
+
+    Args:
+        value: The stored value.
+
+    Returns:
+        The count, or 0 when it is not a plausible non-negative integer.
+    """
+    if isinstance(value, bool) or not isinstance(value, int):
+        return 0
+    return value if 0 <= value <= MAX_CLI_COUNT else 0
+
+
+def _cli(doc: dict) -> tp.Tuple[int, int]:
+    """Read the CLI invocation and submitted transaction counts from an upload.
 
     Args:
         doc: The parsed upload document.
 
     Returns:
-        The percentage, or None when it is missing or out of range.
+        Tuple of (CLI invocations, transactions submitted), 0 when missing.
     """
     commands = doc.get("commands")
-    value = commands.get("coverage_pct") if isinstance(commands, dict) else None
-    if isinstance(value, bool) or not isinstance(value, int | float):
-        return None
-    if not math.isfinite(value) or not 0 <= value <= MAX_PERCENT:
-        return None
-    return round(float(value), 2)
+    if not isinstance(commands, dict):
+        return 0, 0
+    return _count(commands.get("count")), _count(commands.get("submits"))
 
 
 def _all_time(conn: sqlite3.Connection) -> tp.Tuple[dict, tp.List[dict]]:
@@ -142,11 +152,25 @@ def _all_time(conn: sqlite3.Connection) -> tp.Tuple[dict, tp.List[dict]]:
             }
         )
 
+    by_key = {(n["name"], n["source"]): n for n in names}
+    for n in names:
+        n["invocations"] = n["submits"] = 0
+    cur = conn.execute(
+        f"SELECT testrun_name, {SOURCE_SQL}, payload FROM testrun_stats "
+        "WHERE instr(payload, '\"commands\":{') > 0"
+    )
+    for name, source, raw in cur.fetchall():
+        invocations, submits = _cli(_payload(raw))
+        by_key[(name, source)]["invocations"] += invocations
+        by_key[(name, source)]["submits"] += submits
+
     def total(entries: tp.List[dict]) -> dict:
         return {
             "runs": sum(n["runs"] for n in entries),
             "tests": sum(n["tests"] for n in entries),
             "seconds": round(sum(n["seconds"] for n in entries), 1),
+            "invocations": sum(n["invocations"] for n in entries),
+            "submits": sum(n["submits"] for n in entries),
         }
 
     totals = total(names)
@@ -165,7 +189,7 @@ def _window_runs(conn: sqlite3.Connection, since: datetime) -> tp.List[dict]:
 
     Returns:
         One entry per run, with its steps summed and the latest step's
-        version and coverage.
+        version.
     """
     cur = conn.execute(
         f"SELECT project, testrun_name, run_id, origin, {SOURCE_SQL}, step, timestamp, "
@@ -175,7 +199,7 @@ def _window_runs(conn: sqlite3.Connection, since: datetime) -> tp.List[dict]:
     )
     runs: tp.Dict[tp.Tuple[str, str, str, str], dict] = {}
     for row in cur.fetchall():
-        project, name, run_id, origin, source, step, stamp, executed, duration, raw = row
+        project, name, run_id, origin, source, _step, stamp, executed, duration, raw = row
         doc = _payload(raw)
         key = (project, name, run_id, origin)
         run = runs.get(key)
@@ -188,7 +212,8 @@ def _window_runs(conn: sqlite3.Connection, since: datetime) -> tp.List[dict]:
                 "tests": 0,
                 "seconds": 0.0,
                 "node": None,
-                "coverage": None,
+                "invocations": 0,
+                "submits": 0,
                 "release": False,
             }
         run["steps"] += 1
@@ -197,8 +222,9 @@ def _window_runs(conn: sqlite3.Connection, since: datetime) -> tp.List[dict]:
         run["release"] = run["release"] or (source == CI and doc.get("release") is True)
         # Rows come oldest first, so the last step's values win.
         run["node"] = _version(doc) or run["node"]
-        if step == MAIN_STEP:
-            run["coverage"] = _coverage(doc)
+        invocations, submits = _cli(doc)
+        run["invocations"] += invocations
+        run["submits"] += submits
     return list(runs.values())
 
 
@@ -260,7 +286,6 @@ def build(
     runs = _window_runs(conn, since)
 
     daily: tp.Dict[tp.Tuple[str, str, str], dict] = {}
-    coverage: tp.Dict[str, float] = {}
     for run in runs:
         day = run["started"].date().isoformat()
         entry = daily.setdefault(
@@ -272,14 +297,12 @@ def build(
                 "runs": 0,
                 "tests": 0,
                 "seconds": 0.0,
+                "invocations": 0,
+                "submits": 0,
             },
         )
-        entry["runs"] += 1
-        entry["tests"] += run["tests"]
-        entry["seconds"] += run["seconds"]
-        # Coverage from CI only: a local run is often a small subset of the tests.
-        if run["coverage"] is not None and run["source"] == CI and not run["release"]:
-            coverage[day] = max(coverage.get(day, 0.0), run["coverage"])
+        for key in ("runs", "tests", "seconds", "invocations", "submits"):
+            entry[key] += 1 if key == "runs" else run[key]
 
     latest = [
         {
@@ -305,7 +328,6 @@ def build(
             for e in sorted(daily.values(), key=lambda e: (e["date"], e["name"], e["source"]))
         ],
         "latest": latest,
-        "coverage": [{"date": d, "pct": coverage[d]} for d in sorted(coverage)],
         "releases": _releases(conn),
     }
     if impact is not None:
@@ -396,6 +418,7 @@ def update_impact_command() -> None:
             authors=authors,
             owner=config["IMPACT_OWNER"],
             exclude=config["IMPACT_EXCLUDE_REPOS"],
+            labelled=config["IMPACT_LABELLED"],
             token=config.get("IMPACT_GITHUB_TOKEN"),
         )
     except (OSError, ValueError) as err:

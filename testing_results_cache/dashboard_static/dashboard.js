@@ -40,7 +40,7 @@
 
   function valid(doc) {
     return Boolean(doc) && doc.schema === 1 && typeof doc.generated_at === "string" && doc.all_time && doc.all_time.by_source &&
-      ["test_runs", "daily", "latest", "coverage", "releases"].every((k) => Array.isArray(doc[k]));
+      ["test_runs", "daily", "latest", "releases"].every((k) => Array.isArray(doc[k]));
   }
 
   // A testrun is a name plus its source: a local "nightly" is not the CI "nightly".
@@ -241,14 +241,6 @@
   }
 
   function renderStatic() {
-    byId("a-runs").textContent = fmt(data.all_time.runs);
-    byId("a-cases").textContent = fmt(data.all_time.tests);
-    byId("a-hours").textContent = fmt(data.all_time.seconds / 3600);
-    const ci = data.all_time.by_source.ci;
-    const local = data.all_time.by_source.local;
-    byId("a-runs-hint").textContent = `${fmt(ci.runs)} CI · ${fmt(local.runs)} local`;
-    byId("a-cases-hint").textContent = `${fmt(ci.tests)} CI · ${fmt(local.tests)} local`;
-    byId("a-hours-hint").textContent = `${fmt(ci.seconds / 3600)} CI · ${fmt(local.seconds / 3600)} local`;
     const releases = data.releases.map((r) => {
       const li = h("li");
       const left = h("span");
@@ -281,19 +273,19 @@
     byId("t-cases").textContent = fmt(sum(daily, "tests"));
     byId("t-time").textContent = dur(sum(daily, "seconds"));
 
-    const cov = data.coverage.filter((c) => c.date >= start);
-    if (cov.length) {
-      const first = cov[0].pct;
-      const last = cov[cov.length - 1].pct;
-      const change = last - first;
-      byId("t-cov").textContent = `${last.toFixed(1)}%`;
-      byId("t-cov-hint").textContent = `${change >= 0 ? "+" : ""}${change.toFixed(1)} points in ${days} days`;
-    } else {
-      byId("t-cov").textContent = "–";
-      byId("t-cov-hint").textContent = "no coverage report in this window";
-    }
+    const invocations = sum(daily, "invocations");
+    byId("t-cli").textContent = fmt(invocations);
+    byId("t-cli-hint").textContent = `${fmt(sum(daily, "submits"))} transactions submitted`;
 
-    const allTimeTests = data.test_runs.filter(filterMatch).reduce((s, t) => s + t.tests, 0);
+    // All-time figures for the same filters (test type, source, test run).
+    const allTime = data.test_runs.filter(filterMatch);
+    const atSum = (k) => allTime.reduce((s, t) => s + t[k], 0);
+    byId("t-runs-all").textContent = `${fmt(atSum("runs"))} all time`;
+    byId("t-cases-all").textContent = `${fmt(atSum("tests"))} all time`;
+    byId("t-time-all").textContent = `${dur(atSum("seconds"))} all time`;
+    byId("t-cli-all").textContent = `${fmt(atSum("invocations"))} all time · ${fmt(atSum("submits"))} submitted`;
+
+    const allTimeTests = atSum("tests");
     let running = allTimeTests - sum(daily, "tests");
     const rows = [];
     for (let i = days - 1; i >= 0; i -= 1) {

@@ -52,6 +52,8 @@ def create_app() -> flask.Flask:
         IMPACT_AUTHORS=[],
         IMPACT_OWNER="IntersectMBO",
         IMPACT_EXCLUDE_REPOS=["cardano-node-tests", "cardano-sync-tests"],
+        # Issues filed in our own repo for problems found without an upstream issue.
+        IMPACT_LABELLED=[["cardano-node-tests", "upstream bug"]],
         IMPACT_GITHUB_TOKEN=None,
         IMPACT_FILE=str(instance_path / "impact.json"),
         MAX_CONTENT_LENGTH=16 * 1000 * 1000,  # 16MB
