@@ -2,7 +2,9 @@
 
 `fetch` asks the GitHub issue search for the issues each configured account
 opened in the configured organisation, leaving out our own test
-repositories. `save` keeps them in a private file next to the database, and
+repositories, plus the issues carrying a given label in a given repository
+(issues we file in our own repo for problems found without an upstream
+issue). `save` keeps them in a private file next to the database, and
 `load_section` turns that file into the bounded `impact` section of the
 public dashboard document.
 """
@@ -96,19 +98,45 @@ def _issue(item: dict) -> tp.Optional[dict]:
     }
 
 
+def _search(query: str, token: tp.Optional[str], get: Getter) -> tp.Iterator[dict]:
+    """Yield the usable results of one search, page by page.
+
+    Args:
+        query: The GitHub search query.
+        token: A GitHub token, or None to search without one.
+        get: The page fetcher.
+
+    Yields:
+        Each result reduced to the fields the dashboard shows.
+    """
+    for page in range(1, MAX_PAGES + 1):
+        params = urllib.parse.urlencode({"q": query, "per_page": PER_PAGE, "page": page})
+        items = get(f"{SEARCH_URL}?{params}", token).get("items") or []
+        for item in items:
+            issue = _issue(item)
+            if issue:
+                yield issue
+        if len(items) < PER_PAGE:
+            return
+
+
 def fetch(
     authors: tp.Sequence[str],
     owner: str,
     exclude: tp.Collection[str],
+    labelled: tp.Sequence[tp.Sequence[str]] = (),
     token: tp.Optional[str] = None,
     get: Getter = _get,
 ) -> tp.List[dict]:
-    """Collect the issues the given accounts opened, newest first.
+    """Collect the issues found by our testing, newest first.
 
     Args:
         authors: GitHub logins whose issues count as found by our testing.
         owner: The GitHub organisation to search in.
-        exclude: Repository names to leave out, such as our own test repos.
+        exclude: Repository names to leave out of the author search, such as
+            our own test repos.
+        labelled: (repository, label) pairs whose issues count from any
+            author, even in an excluded repository.
         token: A GitHub token, or None to search without one.
         get: The page fetcher, replaceable in tests.
 
@@ -117,17 +145,12 @@ def fetch(
     """
     issues: tp.Dict[tp.Tuple[str, int], dict] = {}
     for author in authors:
-        for page in range(1, MAX_PAGES + 1):
-            query = urllib.parse.urlencode(
-                {"q": f"is:issue author:{author} org:{owner}", "per_page": PER_PAGE, "page": page}
-            )
-            items = get(f"{SEARCH_URL}?{query}", token).get("items") or []
-            for item in items:
-                issue = _issue(item)
-                if issue and issue["repo"] not in exclude:
-                    issues[(issue["repo"], issue["number"])] = issue
-            if len(items) < PER_PAGE:
-                break
+        for issue in _search(f"is:issue author:{author} org:{owner}", token, get):
+            if issue["repo"] not in exclude:
+                issues[(issue["repo"], issue["number"])] = issue
+    for repo, label in labelled:
+        for issue in _search(f'is:issue repo:{owner}/{repo} label:"{label}"', token, get):
+            issues[(issue["repo"], issue["number"])] = issue
     return sorted(issues.values(), key=lambda i: (i["opened"], i["number"]), reverse=True)
 
 

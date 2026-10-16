@@ -50,11 +50,22 @@ TOP_KEYS = {
     "test_runs",
     "daily",
     "latest",
-    "coverage",
     "releases",
 }
-TEST_RUN_KEYS = {"name", "source", "type", "release", "runs", "tests", "seconds", "first", "last"}
-DAILY_KEYS = {"date", "name", "source", "runs", "tests", "seconds"}
+TEST_RUN_KEYS = {
+    "name",
+    "source",
+    "type",
+    "release",
+    "runs",
+    "tests",
+    "seconds",
+    "invocations",
+    "submits",
+    "first",
+    "last",
+}
+DAILY_KEYS = {"date", "name", "source", "runs", "tests", "seconds", "invocations", "submits"}
 LATEST_KEYS = {"started", "name", "source", "steps", "tests", "seconds", "node"}
 RELEASE_KEYS = {"name", "version", "runs", "tests", "last"}
 UPGRADE_STEPS = 3
@@ -62,6 +73,10 @@ OLD_DAYS = dashboard.WINDOW_DAYS + 5
 WAITING_TESTS = 7
 HOOK_TESTS = 33
 SKIP_TOTAL = 100
+CLI_A = 1000
+CLI_B = 250
+SUBMITS_A = 40
+SUBMITS_B = 7
 SKIP_SKIPPED = 25
 
 
@@ -181,15 +196,6 @@ class TestBuild:
         assert "staging-box-7" not in json.dumps(doc)
         assert {t["source"] for t in doc["test_runs"]} == {"local"}
 
-    def test_coverage_comes_from_ci_only(
-        self, app: flask.Flask, client: flask.testing.FlaskClient, auth_headers: dict
-    ) -> None:
-        """Ignore the coverage of a local run, which is often a subset."""
-        _upload(
-            client, auth_headers, _doc(origin="local", commands={"count": 1, "coverage_pct": 90.0})
-        )
-        assert _build(app)["coverage"] == []
-
     def test_an_upgrade_counts_as_one_run(self, app: flask.Flask, seeded: dict) -> None:
         """Sum the three steps of an upgrade into one run."""
         doc = _build(app)
@@ -269,18 +275,6 @@ class TestBuild:
         _upload(client, auth_headers, _doc(versions={"cardano_node": "x" * 500}))
         assert _build(app)["latest"][0]["node"] is None
 
-    def test_coverage_takes_the_highest_value_of_the_day(
-        self, app: flask.Flask, client: flask.testing.FlaskClient, auth_headers: dict
-    ) -> None:
-        """Report the best coverage of each day, ignoring out-of-range values."""
-        for run_id, pct in (("1", 30.0), ("2", 31.5), ("3", 250.0)):
-            _upload(
-                client,
-                auth_headers,
-                _doc(run_id=run_id, commands={"count": 1, "coverage_pct": pct}),
-            )
-        assert _build(app)["coverage"] == [{"date": NOW.date().isoformat(), "pct": 31.5}]
-
     def test_skipped_tests_are_not_counted(
         self, app: flask.Flask, client: flask.testing.FlaskClient, auth_headers: dict
     ) -> None:
@@ -300,10 +294,64 @@ class TestBuild:
         assert [r["tests"] for r in doc["latest"]] == [ran]
         assert [r["tests"] for r in doc["releases"]] == [ran]
 
+    def test_cli_counts_are_summed(
+        self, app: flask.Flask, client: flask.testing.FlaskClient, auth_headers: dict
+    ) -> None:
+        """Add up CLI invocations and submits per day, per testrun and all time."""
+        for run_id, count, submits in (("1", CLI_A, SUBMITS_A), ("2", CLI_B, SUBMITS_B)):
+            _upload(
+                client,
+                auth_headers,
+                _doc(run_id=run_id, commands={"count": count, "submits": submits}),
+            )
+        doc = _build(app)
+        assert doc["all_time"]["invocations"] == CLI_A + CLI_B
+        assert doc["all_time"]["submits"] == SUBMITS_A + SUBMITS_B
+        (nightly,) = doc["test_runs"]
+        assert (nightly["invocations"], nightly["submits"]) == (
+            CLI_A + CLI_B,
+            SUBMITS_A + SUBMITS_B,
+        )
+        assert [(d["invocations"], d["submits"]) for d in doc["daily"]] == [
+            (CLI_A + CLI_B, SUBMITS_A + SUBMITS_B)
+        ]
+
+    def test_cli_counts_add_up_across_upgrade_steps(
+        self, app: flask.Flask, client: flask.testing.FlaskClient, auth_headers: dict
+    ) -> None:
+        """Sum the CLI counts of every step of one upgrade run."""
+        for i in range(1, UPGRADE_STEPS + 1):
+            _upload(
+                client,
+                auth_headers,
+                _doc(
+                    testrun_name="nightly-upgrade",
+                    run_id="9",
+                    step=f"step{i}",
+                    timestamp=_ago(0.5 - i / 100),
+                    commands={"count": CLI_B, "submits": SUBMITS_B},
+                ),
+            )
+        (day,) = _build(app)["daily"]
+        assert day["runs"] == 1
+        assert (day["invocations"], day["submits"]) == (
+            UPGRADE_STEPS * CLI_B,
+            UPGRADE_STEPS * SUBMITS_B,
+        )
+
+    @pytest.mark.parametrize("bad", [-1, True, "1000", 10**12, None])
+    def test_an_implausible_cli_count_is_ignored(
+        self, app: flask.Flask, client: flask.testing.FlaskClient, auth_headers: dict, bad: object
+    ) -> None:
+        """Count a value that is not a plausible non-negative integer as zero."""
+        _upload(client, auth_headers, _doc(commands={"count": bad, "submits": bad}))
+        totals = _build(app)["all_time"]
+        assert (totals["invocations"], totals["submits"]) == (0, 0)
+
     def test_an_empty_database_builds_an_empty_document(self, app: flask.Flask) -> None:
         """Build a valid document before any run is stored."""
         doc = _build(app)
-        zero = {"runs": 0, "tests": 0, "seconds": 0}
+        zero = {"runs": 0, "tests": 0, "seconds": 0, "invocations": 0, "submits": 0}
         assert doc["all_time"] == {**zero, "by_source": {"ci": zero, "local": zero}}
         assert doc["daily"] == doc["latest"] == doc["releases"] == []
 

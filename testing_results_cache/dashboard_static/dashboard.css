@@ -107,6 +107,10 @@ h2 { margin: 0 0 10px; font-size: 15px; font-weight: 600; }
 .label { display: block; color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; }
 .value { display: block; font-size: 28px; font-weight: 650; font-variant-numeric: tabular-nums; }
 .hint { display: block; color: var(--muted); font-size: 12px; }
+.hint.all { margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--line); color: var(--fg); }
+.about-tests { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+@media (max-width: 900px) { .about-tests { grid-template-columns: minmax(0, 1fr); } }
+.about-tests p { margin: 0; font-size: 14px; }
 .row2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
 @media (max-width: 1000px) { .row2 { grid-template-columns: 1fr; } }
 svg { display: block; width: 100%; height: auto; }

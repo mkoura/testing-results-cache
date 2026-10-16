@@ -59,17 +59,22 @@
       <p id="subheading">System-level tests run against Cardano node builds and releases.</p>
     </div>
 
-    <section class="hero" aria-label="Since tracking started">
-      <div><span class="label">Test runs, all time</span><span class="value" id="a-runs">–</span><span class="hint" id="a-runs-hint"></span></div>
-      <div><span class="label">Tests executed, all time</span><span class="value" id="a-cases">–</span><span class="hint" id="a-cases-hint"></span></div>
-      <div><span class="label">Hours of testing, all time</span><span class="value" id="a-hours">–</span><span class="hint" id="a-hours-hint"></span></div>
+    <section class="tiles" aria-label="Totals">
+      <div class="tile"><span class="label">Test runs</span><span class="value" id="t-runs">–</span><span class="hint" id="t-runs-hint"></span><span class="hint all" id="t-runs-all"></span></div>
+      <div class="tile"><span class="label">Tests executed</span><span class="value" id="t-cases">–</span><span class="hint">skipped tests not counted</span><span class="hint all" id="t-cases-all"></span></div>
+      <div class="tile"><span class="label">Test time</span><span class="value" id="t-time">–</span><span class="hint">wall clock, summed</span><span class="hint all" id="t-time-all"></span></div>
+      <div class="tile"><span class="label">CLI invocations</span><span class="value" id="t-cli">–</span><span class="hint" id="t-cli-hint"></span><span class="hint all" id="t-cli-all"></span></div>
     </section>
 
-    <section class="tiles" aria-label="Totals in the window">
-      <div class="tile"><span class="label">Test runs</span><span class="value" id="t-runs">–</span><span class="hint" id="t-runs-hint"></span></div>
-      <div class="tile"><span class="label">Tests executed</span><span class="value" id="t-cases">–</span><span class="hint">all steps of all runs</span></div>
-      <div class="tile"><span class="label">Test time</span><span class="value" id="t-time">–</span><span class="hint">wall clock, summed</span></div>
-      <div class="tile"><span class="label">CLI coverage</span><span class="value" id="t-cov">–</span><span class="hint" id="t-cov-hint"></span></div>
+    <section class="about-tests" aria-label="What we test">
+      <div class="card">
+        <h3>Regression testing</h3>
+        <p>End-to-end tests of cardano-node and cardano-cli on a local Cardano testnet. They run every night against the latest node from the master branch, in several setups, and on demand for each node release.</p>
+      </div>
+      <div class="card">
+        <h3>Upgrade testing</h3>
+        <p>One run in three steps. Step 1 starts a cluster on the released node and runs the tests. Step 2 upgrades all nodes but one pool, so old and new versions run side by side, and runs the tests again. Step 3 completes the upgrade, with a hard fork when one is due, and runs them a third time.</p>
+      </div>
     </section>
 
     <section class="panel impact-panel" id="impact" aria-label="Issues found by our testing" hidden>
@@ -191,7 +196,7 @@
         <div><dt>Regression</dt><dd>The system-level test suite against a local Cardano testnet, run nightly and for node releases.</dd></div>
         <div><dt>Upgrade</dt><dd>One run in three steps across a node upgrade. It counts as one run; its tests are the sum of the three steps.</dd></div>
         <div><dt>Tests executed</dt><dd>Every test that ran, in every run and step. Skipped tests are not counted.</dd></div>
-        <div><dt>CLI coverage</dt><dd>Share of cardano-cli arguments the tests exercise. The highest value reached by a CI run that day.</dd></div>
+        <div><dt>CLI invocations</dt><dd>How many times the tests ran a cardano-cli command, and how many transactions they submitted.</dd></div>
       </dl>
       <p class="foot">CI runs come from GitHub Actions. Local runs are uploaded by developers from their own machines. The page checks for new data every 60 seconds.</p>
     </section>
@@ -201,6 +206,9 @@
       <dl>
         <div><dt>Test suite</dt><dd><a href="https://github.com/IntersectMBO/cardano-node-tests">IntersectMBO/cardano-node-tests</a></dd></div>
         <div><dt>Results cache</dt><dd><a href="https://github.com/mkoura/testing-results-cache">mkoura/testing-results-cache</a></dd></div>
+        <div><dt>Sync tests</dt><dd><a href="https://github.com/IntersectMBO/cardano-sync-tests">IntersectMBO/cardano-sync-tests</a></dd></div>
+        <div><dt>Local testnets</dt><dd><a href="https://github.com/IntersectMBO/cardonnay">IntersectMBO/cardonnay</a></dd></div>
+        <div><dt>CLI library</dt><dd><a href="https://github.com/input-output-hk/cardano-clusterlib-py">input-output-hk/cardano-clusterlib-py</a></dd></div>
       </dl>
       <p class="foot" id="updated">Loading…</p>
     </section>
