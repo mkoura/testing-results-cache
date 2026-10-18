@@ -33,11 +33,12 @@ CI = "ci"
 LOCAL = "local"
 MAIN_STEP = "main"
 DATA_FILE = "dashboard.json"
-TMP_FILE = ".dashboard.json.tmp"
 LOCK_FILE = ".dashboard.lock"
 MAX_VERSION_LENGTH = 64
 MAX_CLI_COUNT = 10**9
 EXECUTED_SQL = "cases - skipped"
+# Pre-filters rows in SQL; `_is_release` then checks the flag in the parsed document.
+RELEASE_FLAG = '"release":true'
 # Any origin other than "ci" is shown as "local", so no other value reaches the page.
 SOURCE_SQL = "CASE WHEN origin = 'ci' THEN 'ci' ELSE 'local' END"
 ASSETS_DIR = pl.Path(__file__).parent / "dashboard_static"
@@ -88,6 +89,19 @@ def _version(doc: dict) -> tp.Optional[str]:
     return None
 
 
+def _is_release(doc: dict, source: str) -> bool:
+    """Tell whether an upload is a CI release run.
+
+    Args:
+        doc: The parsed upload document.
+        source: `ci` or `local`.
+
+    Returns:
+        True when a CI run carries `"release": true` at the top level.
+    """
+    return source == CI and doc.get("release") is True
+
+
 def _count(value: object) -> int:
     """Read a CLI count from an upload document.
 
@@ -131,19 +145,18 @@ def _all_time(conn: sqlite3.Connection) -> tp.Tuple[dict, tp.List[dict]]:
         f"SELECT testrun_name, {SOURCE_SQL} AS source, "
         "COUNT(DISTINCT project || '/' || run_id || '/' || origin), "
         f"COALESCE(SUM({EXECUTED_SQL}),0), COALESCE(SUM(duration),0), "
-        "MIN(timestamp), MAX(timestamp), MAX(step != ?), "
-        "MAX(origin = ? AND instr(payload, '\"release\":true') > 0) "
+        "MIN(timestamp), MAX(timestamp), MAX(step != ?) "
         "FROM testrun_stats GROUP BY testrun_name, source ORDER BY testrun_name, source",
-        (MAIN_STEP, CI),
+        (MAIN_STEP,),
     )
     names = []
-    for name, source, runs, tests, seconds, first, last, upgrade, release in cur.fetchall():
+    for name, source, runs, tests, seconds, first, last, upgrade in cur.fetchall():
         names.append(
             {
                 "name": name,
                 "source": source,
                 "type": "upgrade" if upgrade else "regression",
-                "release": bool(release),
+                "release": False,
                 "runs": runs,
                 "tests": tests,
                 "seconds": round(seconds, 1),
@@ -157,12 +170,18 @@ def _all_time(conn: sqlite3.Connection) -> tp.Tuple[dict, tp.List[dict]]:
         n["invocations"] = n["submits"] = 0
     cur = conn.execute(
         f"SELECT testrun_name, {SOURCE_SQL}, payload FROM testrun_stats "
-        "WHERE instr(payload, '\"commands\":{') > 0"
+        f"WHERE instr(payload, '\"commands\":{{') > 0 OR instr(payload, '{RELEASE_FLAG}') > 0"
     )
     for name, source, raw in cur.fetchall():
-        invocations, submits = _cli(_payload(raw))
-        by_key[(name, source)]["invocations"] += invocations
-        by_key[(name, source)]["submits"] += submits
+        entry = by_key.get((name, source))
+        if entry is None:
+            # Stored after the totals were read; the next rebuild counts it.
+            continue
+        doc = _payload(raw)
+        invocations, submits = _cli(doc)
+        entry["invocations"] += invocations
+        entry["submits"] += submits
+        entry["release"] = entry["release"] or _is_release(doc, source)
 
     def total(entries: tp.List[dict]) -> dict:
         """Sum the counts of the given entries.
@@ -222,12 +241,10 @@ def _window_runs(conn: sqlite3.Connection, since: datetime) -> tp.List[dict]:
                 "node": None,
                 "invocations": 0,
                 "submits": 0,
-                "release": False,
             }
         run["steps"] += 1
         run["tests"] += executed
         run["seconds"] += duration
-        run["release"] = run["release"] or (source == CI and doc.get("release") is True)
         # Rows come oldest first, so the last step's values win.
         run["node"] = _version(doc) or run["node"]
         invocations, submits = _cli(doc)
@@ -245,21 +262,23 @@ def _releases(conn: sqlite3.Connection) -> tp.List[dict]:
     Returns:
         One entry per release testrun name.
     """
-    # The stored document is canonical JSON, so the flag is always spelled this way.
     cur = conn.execute(
         f"SELECT testrun_name, run_id, timestamp, {EXECUTED_SQL}, payload FROM testrun_stats "
-        "WHERE origin = ? AND instr(payload, '\"release\":true') > 0 ORDER BY timestamp",
+        f"WHERE origin = ? AND instr(payload, '{RELEASE_FLAG}') > 0 ORDER BY timestamp",
         (CI,),
     )
     releases: tp.Dict[str, dict] = {}
     for name, run_id, stamp, executed, raw in cur.fetchall():
+        doc = _payload(raw)
+        if not _is_release(doc, CI):
+            continue
         entry = releases.setdefault(
             name, {"name": name, "version": None, "run_ids": set(), "tests": 0, "last": None}
         )
         entry["run_ids"].add(run_id)
         entry["tests"] += executed
         entry["last"] = _timestamp(stamp).isoformat()
-        entry["version"] = _version(_payload(raw)) or entry["version"]
+        entry["version"] = _version(doc) or entry["version"]
     out = [
         {
             "name": e["name"],
@@ -385,7 +404,11 @@ def rebuild_for_app(conn: sqlite3.Connection) -> bool:
     config = flask.current_app.config
     if not config.get("DASHBOARD_FOLDER"):
         return False
-    impact = impact_mod.load_section(pl.Path(config["IMPACT_FILE"]))
+    impact = (
+        impact_mod.load_section(pl.Path(config["IMPACT_FILE"]))
+        if config.get("IMPACT_AUTHORS")
+        else None
+    )
     rebuild(conn, pl.Path(config["DASHBOARD_FOLDER"]), impact)
     return True
 

@@ -72,6 +72,7 @@ UPGRADE_STEPS = 3
 OLD_DAYS = dashboard.WINDOW_DAYS + 5
 WAITING_TESTS = 7
 HOOK_TESTS = 33
+TWO_RUNS = 2
 SKIP_TOTAL = 100
 CLI_A = 1000
 CLI_B = 250
@@ -282,6 +283,34 @@ class TestBuild:
         assert doc["latest"][0]["node"] is None
         assert doc["releases"] == []
 
+    def test_a_ci_and_a_local_run_with_one_id_are_two_runs(
+        self, app: flask.Flask, client: flask.testing.FlaskClient, auth_headers: dict
+    ) -> None:
+        """Keep a CI run and a local run apart even when they share a run id."""
+        _upload(client, auth_headers, _doc(run_id="7", origin="ci"))
+        _upload(client, auth_headers, _doc(run_id="7", origin="local"))
+        doc = _build(app)
+        assert doc["all_time"]["runs"] == TWO_RUNS
+        assert sorted(r["source"] for r in doc["latest"]) == ["ci", "local"]
+
+    def test_latest_runs_come_newest_first(
+        self, app: flask.Flask, client: flask.testing.FlaskClient, auth_headers: dict
+    ) -> None:
+        """List the most recent run first."""
+        for run_id, days in (("old", 3), ("new", 1), ("mid", 2)):
+            _upload(client, auth_headers, _doc(run_id=run_id, timestamp=_ago(days)))
+        started = [r["started"] for r in _build(app)["latest"]]
+        assert started == sorted(started, reverse=True)
+
+    def test_a_nested_release_key_is_not_a_release(
+        self, app: flask.Flask, client: flask.testing.FlaskClient, auth_headers: dict
+    ) -> None:
+        """Count only a top-level release flag, not one buried in another field."""
+        _upload(client, auth_headers, _doc(notes={"release": True}))
+        doc = _build(app)
+        assert doc["releases"] == []
+        assert [t["release"] for t in doc["test_runs"]] == [False]
+
     def test_an_unusable_version_is_dropped(
         self, app: flask.Flask, client: flask.testing.FlaskClient, auth_headers: dict
     ) -> None:
@@ -382,7 +411,7 @@ class TestWrite:
         written = json.loads((tmp_path / dashboard.DATA_FILE).read_text())
         assert written["all_time"]["tests"] == seeded["all_time_tests"]
         assert written == _build(app) | {"generated_at": written["generated_at"]}
-        assert not (tmp_path / dashboard.TMP_FILE).exists()
+        assert list(tmp_path.glob(".*.tmp")) == []
 
     def test_the_file_is_always_whole_while_it_is_replaced(self, tmp_path: pl.Path) -> None:
         """Never let a reader see a missing or half-written file."""
@@ -449,17 +478,21 @@ class TestUploadHook:
         written = json.loads((tmp_path / dashboard.DATA_FILE).read_text())
         assert written["all_time"]["tests"] == HOOK_TESTS
 
-    def test_no_folder_means_no_file(
+    def test_no_folder_means_no_rebuild(
         self,
         app: flask.Flask,
         client: flask.testing.FlaskClient,
         auth_headers: dict,
-        tmp_path: pl.Path,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
     ) -> None:
-        """Do nothing when no dashboard folder is configured."""
+        """Skip the rebuild cleanly when no dashboard folder is configured."""
+        calls: tp.List[object] = []
+        monkeypatch.setattr(dashboard, "rebuild", lambda *args: calls.append(args))
         assert app.config["DASHBOARD_FOLDER"] is None
         _upload(client, auth_headers, _doc())
-        assert list(tmp_path.glob("**/" + dashboard.DATA_FILE)) == []
+        assert calls == []
+        assert "Failed to rebuild the dashboard" not in caplog.text
 
     def test_a_failed_rebuild_does_not_fail_the_upload(
         self,

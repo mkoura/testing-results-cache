@@ -116,8 +116,8 @@ class TestFetch:
         )
         impact.fetch(["alice", "bob"], OWNER, exclude=(), token="t0k", get=fake)
         assert [q["q"] for q in fake.queries] == [
-            f"is:issue author:alice org:{OWNER}",
-            f"is:issue author:bob org:{OWNER}",
+            f"is:issue is:public author:alice org:{OWNER}",
+            f"is:issue is:public author:bob org:{OWNER}",
         ]
         assert {q["token"] for q in fake.queries} == {"t0k"}
 
@@ -142,8 +142,18 @@ class TestFetch:
         )
         assert [i["number"] for i in issues] == [2]
         assert fake.labelled_queries == [
-            f'is:issue repo:{OWNER}/cardano-node-tests label:"upstream bug"'
+            f'is:issue is:public repo:{OWNER}/cardano-node-tests label:"upstream bug"'
         ]
+
+    def test_refuses_incomplete_results(self) -> None:
+        """Fail rather than store a partial list when the search timed out."""
+
+        def timed_out(_url: str, _token: tp.Optional[str]) -> dict:
+            """Answer like a GitHub search that ran out of time."""
+            return {"incomplete_results": True, "items": [_item("cardano-node", 1)]}
+
+        with pytest.raises(ValueError, match="incomplete results"):
+            impact.fetch(["alice"], OWNER, exclude=(), get=timed_out)
 
     def test_drops_malformed_results(self) -> None:
         """Skip a result with a missing field or an unexpected value."""
@@ -395,6 +405,22 @@ class TestConfig:
         assert app_module.create_app().config["IMPACT_GITHUB_TOKEN"] == "ghp_from_file"
 
 
+class TestAuthorsSwitch:
+    """Tests for IMPACT_AUTHORS turning the impact section on and off."""
+
+    def test_no_authors_means_no_section(self, app: flask.Flask, tmp_path: pl.Path) -> None:
+        """Leave the section out, even when an old impact file is still there."""
+        path = tmp_path / "impact.json"
+        impact.save(path, OWNER, ONE_ISSUE)
+        app.config.update(
+            IMPACT_AUTHORS=[], IMPACT_FILE=str(path), DASHBOARD_FOLDER=str(tmp_path / "site")
+        )
+        with app.app_context():
+            dashboard.rebuild_for_app(dashboard.flask_db.get_db())
+        written = json.loads((tmp_path / "site" / dashboard.DATA_FILE).read_text())
+        assert "impact" not in written
+
+
 class TestUploadHook:
     """Tests for the impact section in the file an upload rebuilds."""
 
@@ -408,7 +434,9 @@ class TestUploadHook:
         """Carry the stored issues into the file a stats upload rebuilds."""
         path = tmp_path / "impact.json"
         impact.save(path, OWNER, ONE_ISSUE)
-        app.config.update(IMPACT_FILE=str(path), DASHBOARD_FOLDER=str(tmp_path / "site"))
+        app.config.update(
+            IMPACT_AUTHORS=["alice"], IMPACT_FILE=str(path), DASHBOARD_FOLDER=str(tmp_path / "site")
+        )
         doc = {
             "schema": 1,
             "project": "cardano-node-tests",

@@ -315,8 +315,8 @@ flask --app testing_results_cache.app:create_app build-dashboard
 ```
 
 Fetch the issues found by our testing from GitHub and rebuild the page. Nothing
-runs this for you: put it in a daily cron job or systemd timer. A read-only
-GitHub token raises the search rate limit. Set it in the `IMPACT_GITHUB_TOKEN`
+runs this for you: put it in a daily cron job or systemd timer. Only public
+repositories are searched. A read-only GitHub token raises the search rate limit. Set it in the `IMPACT_GITHUB_TOKEN`
 environment variable rather than in `config.py`:
 
 ```sh

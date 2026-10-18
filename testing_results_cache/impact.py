@@ -111,7 +111,12 @@ def _search(query: str, token: tp.Optional[str], get: Getter) -> tp.Iterator[dic
     """
     for page in range(1, MAX_PAGES + 1):
         params = urllib.parse.urlencode({"q": query, "per_page": PER_PAGE, "page": page})
-        items = get(f"{SEARCH_URL}?{params}", token).get("items") or []
+        page_data = get(f"{SEARCH_URL}?{params}", token)
+        if page_data.get("incomplete_results"):
+            # A timed-out search would publish a lower count; keep the stored issues instead.
+            msg = f"GitHub returned incomplete results for {query!r}"
+            raise ValueError(msg)
+        items = page_data.get("items") or []
         for item in items:
             issue = _issue(item)
             if issue:
@@ -145,11 +150,12 @@ def fetch(
     """
     issues: tp.Dict[tp.Tuple[str, int], dict] = {}
     for author in authors:
-        for issue in _search(f"is:issue author:{author} org:{owner}", token, get):
+        for issue in _search(f"is:issue is:public author:{author} org:{owner}", token, get):
             if issue["repo"] not in exclude:
                 issues[(issue["repo"], issue["number"])] = issue
     for repo, label in labelled:
-        for issue in _search(f'is:issue repo:{owner}/{repo} label:"{label}"', token, get):
+        query = f'is:issue is:public repo:{owner}/{repo} label:"{label}"'
+        for issue in _search(query, token, get):
             issues[(issue["repo"], issue["number"])] = issue
     return sorted(issues.values(), key=lambda i: (i["opened"], i["number"]), reverse=True)
 
