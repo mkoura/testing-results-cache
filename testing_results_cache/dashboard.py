@@ -10,6 +10,7 @@ the database can reach it. Every run is marked `ci` or `local`.
 
 import fcntl
 import json
+import math
 import pathlib as pl
 import shutil
 import sqlite3
@@ -144,7 +145,7 @@ def _all_time(conn: sqlite3.Connection) -> tp.Tuple[dict, tp.List[dict]]:
     cur = conn.execute(
         f"SELECT testrun_name, {SOURCE_SQL} AS source, "
         "COUNT(DISTINCT project || '/' || run_id || '/' || origin), "
-        f"COALESCE(SUM({EXECUTED_SQL}),0), COALESCE(SUM(duration),0), "
+        f"COALESCE(SUM({EXECUTED_SQL}),0), SUM(duration), "
         "MIN(timestamp), MAX(timestamp), MAX(step != ?) "
         "FROM testrun_stats GROUP BY testrun_name, source ORDER BY testrun_name, source",
         (MAIN_STEP,),
@@ -159,7 +160,8 @@ def _all_time(conn: sqlite3.Connection) -> tp.Tuple[dict, tp.List[dict]]:
                 "release": False,
                 "runs": runs,
                 "tests": tests,
-                "seconds": round(seconds, 1),
+                # SQLite 3.45 returns an overflowed float sum as NULL, newer versions as inf.
+                "seconds": math.nan if seconds is None else round(seconds, 1),
                 "first": _timestamp(first).isoformat(),
                 "last": _timestamp(last).isoformat(),
             }

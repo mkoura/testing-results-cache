@@ -413,6 +413,33 @@ class TestWrite:
         assert written == _build(app) | {"generated_at": written["generated_at"]}
         assert list(tmp_path.glob(".*.tmp")) == []
 
+    @pytest.mark.parametrize("days", [1, OLD_DAYS])
+    def test_an_overflowing_duration_keeps_the_old_file(
+        self,
+        app: flask.Flask,
+        client: flask.testing.FlaskClient,
+        auth_headers: dict,
+        tmp_path: pl.Path,
+        days: int,
+    ) -> None:
+        """Keep the old file rather than publish a duration that is not finite."""
+        for run_id in ("a", "b"):
+            _upload(client, auth_headers, _doc(run_id=run_id, timestamp=_ago(days)))
+        data_file = tmp_path / dashboard.DATA_FILE
+        with app.app_context():
+            conn = flask_db.get_db()
+            dashboard.rebuild(conn, tmp_path)
+            old = data_file.read_bytes()
+            # The API refuses such durations, so write them outside it.
+            conn.execute("UPDATE testrun_stats SET duration = 1e308")
+            conn.commit()
+
+            with pytest.raises(ValueError, match="Out of range float"):
+                dashboard.rebuild(conn, tmp_path)
+
+        assert data_file.read_bytes() == old
+        assert list(tmp_path.glob(".*.tmp")) == []
+
     def test_the_file_is_always_whole_while_it_is_replaced(self, tmp_path: pl.Path) -> None:
         """Never let a reader see a missing or half-written file."""
         dashboard.write(tmp_path, {"seq": 0})
