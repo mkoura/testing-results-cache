@@ -1,7 +1,9 @@
 """Tests for the issues found by our testing (impact.py) and its dashboard wiring."""
 
 import http
+import http.server
 import json
+import threading
 import typing as tp
 import urllib.parse
 from pathlib import Path
@@ -100,6 +102,13 @@ class TestFetch:
         assert len(issues) == FULL_PAGE + SECOND_PAGE
         assert [q["page"] for q in fake.queries] == ["1", "2"]
 
+    def test_stops_at_the_page_limit(self) -> None:
+        """Ask for no more than MAX_PAGES pages, even when every page is full."""
+        full = [_item("cardano-node", n) for n in range(FULL_PAGE)]
+        fake = FakeGitHub({"alice": [full] * (impact.MAX_PAGES + 3)})
+        impact.fetch(["alice"], OWNER, exclude=(), get=fake)
+        assert len(fake.queries) == impact.MAX_PAGES
+
     def test_asks_for_each_author_in_the_organisation(self) -> None:
         """Search issues by every author, inside the configured organisation."""
         fake = FakeGitHub(
@@ -171,6 +180,56 @@ class TestFetch:
         fake = FakeGitHub({"alice": [[older, newer]], "bob": [[older]]})
         issues = impact.fetch(["alice", "bob"], OWNER, exclude=(), get=fake)
         assert [i["number"] for i in issues] == [2, 1]
+
+
+class _Recorder(http.server.BaseHTTPRequestHandler):
+    """Answer one canned search page and remember the request headers."""
+
+    seen: tp.ClassVar[tp.List[dict]] = []
+
+    def do_GET(self) -> None:  # noqa: N802
+        """Serve the canned page."""
+        type(self).seen.append(dict(self.headers))
+        body = json.dumps({"items": [_item("cardano-node", 1)]}).encode()
+        self.send_response(http.HTTPStatus.OK)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *_args: object) -> None:
+        """Keep the test output quiet."""
+
+
+@pytest.fixture
+def local_github() -> tp.Iterator[str]:
+    """Run a local HTTP server standing in for the GitHub search API."""
+    _Recorder.seen = []
+    server = http.server.HTTPServer(("127.0.0.1", 0), _Recorder)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    yield f"http://127.0.0.1:{server.server_port}/search/issues?q=x"
+    server.shutdown()
+    server.server_close()
+
+
+class TestGet:
+    """Tests for the real page fetcher, against a local server."""
+
+    def test_sends_the_token_and_decodes_the_page(self, local_github: str) -> None:
+        """Send the token as a bearer header and return the decoded page."""
+        page = impact._get(local_github, "t0k")
+        assert page["items"][0]["number"] == 1
+        (headers,) = _Recorder.seen
+        assert headers["Authorization"] == "Bearer t0k"
+        assert headers["Accept"] == "application/vnd.github+json"
+        assert headers["User-Agent"] == "testing-results-cache"
+
+    def test_sends_no_token_when_none_is_set(self, local_github: str) -> None:
+        """Search anonymously when no token is configured."""
+        impact._get(local_github, None)
+        (headers,) = _Recorder.seen
+        assert "Authorization" not in headers
 
 
 class TestIsBug:
@@ -274,6 +333,19 @@ class TestCommand:
         written = json.loads((tmp_path / "site" / dashboard.DATA_FILE).read_text())
         assert written["impact"]["found"] == 1
         assert written["impact"]["latest"] == ONE_ISSUE
+
+    def test_stores_issues_without_a_dashboard_folder(
+        self, app: flask.Flask, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Store the issues and skip the rebuild when no dashboard folder is set."""
+        path = tmp_path / "impact.json"
+        app.config.update(IMPACT_AUTHORS=["alice"], IMPACT_FILE=str(path), DASHBOARD_FOLDER=None)
+        monkeypatch.setattr(impact, "fetch", lambda **_kw: ONE_ISSUE)
+        result = _run(app, dashboard.update_impact_command)
+        assert result.exit_code == 0, result.output
+        assert "Stored 1 issues." in result.output
+        assert "Dashboard rebuilt" not in result.output
+        assert json.loads(path.read_text())["issues"] == ONE_ISSUE
 
     def test_a_failed_fetch_keeps_the_old_file(
         self, app: flask.Flask, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

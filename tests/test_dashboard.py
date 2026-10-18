@@ -268,6 +268,20 @@ class TestBuild:
         assert all(set(r) == LATEST_KEYS for r in doc["latest"])
         assert all(set(r) == RELEASE_KEYS for r in doc["releases"])
 
+    def test_a_broken_stored_document_is_tolerated(
+        self, app: flask.Flask, client: flask.testing.FlaskClient, auth_headers: dict
+    ) -> None:
+        """Still count a run whose stored document cannot be read."""
+        _upload(client, auth_headers, _doc(release=True))
+        with app.app_context():
+            conn = flask_db.get_db()
+            conn.execute("UPDATE testrun_stats SET payload = 'not json'")
+            conn.commit()
+        doc = _build(app)
+        assert doc["all_time"]["runs"] == 1
+        assert doc["latest"][0]["node"] is None
+        assert doc["releases"] == []
+
     def test_an_unusable_version_is_dropped(
         self, app: flask.Flask, client: flask.testing.FlaskClient, auth_headers: dict
     ) -> None:
