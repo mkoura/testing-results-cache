@@ -1011,6 +1011,57 @@ class TestStorageFailures:
         assert response.status_code == http.HTTPStatus.INTERNAL_SERVER_ERROR
         assert response.json["message"] == "Failed to store testrun stats"
 
+    def test_a_non_busy_operational_error_is_a_json_500(
+        self, client: flask.testing.FlaskClient, auth_headers: dict, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Report an OperationalError other than busy as a failure, not a retry."""
+        exc = sqlite3.OperationalError("disk I/O error")
+        exc.sqlite_errorcode = sqlite3.SQLITE_IOERR
+
+        def _ioerr(**_kwargs: object) -> None:
+            raise exc
+
+        monkeypatch.setattr(stats_api.stats_cache, "save_testrun_stats", _ioerr)
+
+        response = _put(client, auth_headers, VALID_PAYLOAD)
+
+        assert response.status_code == http.HTTPStatus.INTERNAL_SERVER_ERROR
+        assert response.json["message"] == "Failed to store testrun stats"
+
+    def test_a_failed_rollback_is_still_a_json_500(
+        self,
+        client: flask.testing.FlaskClient,
+        auth_headers: dict,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Keep the JSON 500 when the rollback after a failed write also fails."""
+        real_get_db = flask_db.get_db
+
+        class _NoRollback:
+            def __init__(self, conn: sqlite3.Connection) -> None:
+                self._conn = conn
+
+            def __getattr__(self, name: str) -> object:
+                return getattr(self._conn, name)
+
+            def rollback(self) -> None:
+                msg = "cannot roll back"
+                raise sqlite3.OperationalError(msg)
+
+        def _boom(**_kwargs: object) -> None:
+            msg = "disk I/O error"
+            raise sqlite3.DatabaseError(msg)
+
+        monkeypatch.setattr(stats_api.flask_db, "get_db", lambda: _NoRollback(real_get_db()))
+        monkeypatch.setattr(stats_api.stats_cache, "save_testrun_stats", _boom)
+
+        response = _put(client, auth_headers, VALID_PAYLOAD)
+
+        assert response.status_code == http.HTTPStatus.INTERNAL_SERVER_ERROR
+        assert response.json["message"] == "Failed to store testrun stats"
+        assert "Rollback failed" in caplog.text
+
     def test_a_failed_upload_stores_nothing(
         self, app: flask.Flask, client: flask.testing.FlaskClient, auth_headers: dict
     ) -> None:
@@ -1029,6 +1080,32 @@ class TestStorageFailures:
             )
 
         assert _row_count(app) == 0
+
+
+class TestNonFiniteTotals:
+    """Tests for the read-side guard against a duration sum that overflows."""
+
+    def test_an_infinite_duration_sum_is_a_json_500(
+        self, app: flask.Flask, client: flask.testing.FlaskClient, auth_headers: dict
+    ) -> None:
+        """Answer JSON 500 rather than emit `Infinity` for rows written outside the API."""
+        with app.app_context():
+            conn = flask_db.get_db()
+            for run_id in ("a", "b"):
+                conn.execute(
+                    "INSERT INTO testrun_stats(project, testrun_name, run_id, step, origin, "
+                    "user_id, timestamp, cases, passed, failed, broken, skipped, never_run, "
+                    "duration, exit_code, filtered, payload) "
+                    "VALUES ('p', 'n', ?, 'main', 'ci', NULL, ?, "
+                    "1, 1, 0, 0, 0, 0, 1e308, 0, 0, '{}')",
+                    (run_id, datetime.now(UTC).strftime(stats_cache.TIMESTAMP_FORMAT)),
+                )
+            conn.commit()
+
+        response = client.get("/stats", headers=auth_headers)
+
+        assert response.status_code == http.HTTPStatus.INTERNAL_SERVER_ERROR
+        assert response.json["message"] == "Failed to read testrun stats"
 
 
 class TestReadFailures:
