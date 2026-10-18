@@ -5,6 +5,7 @@ retry.
 """
 
 import logging
+import math
 import sqlite3
 import typing as tp
 from datetime import UTC
@@ -166,11 +167,15 @@ def get_totals(
         "SELECT COUNT(*), "
         "COALESCE(SUM(cases),0), COALESCE(SUM(passed),0), COALESCE(SUM(failed),0), "
         "COALESCE(SUM(broken),0), COALESCE(SUM(skipped),0), COALESCE(SUM(never_run),0), "
-        "COALESCE(SUM(duration),0) "
+        "SUM(duration) "
         f"FROM testrun_stats{where}",
         params,
     )
     row = cur.fetchone()
+    duration = row[7]
+    if duration is None:
+        # SQLite 3.45 returns an overflowed float sum as NULL, newer versions as inf.
+        duration = math.nan if row[0] else 0.0
     return common.TestrunStatsTotals(
         runs=row[0],
         cases=row[1],
@@ -179,7 +184,7 @@ def get_totals(
         broken=row[4],
         skipped=row[5],
         never_run=row[6],
-        duration=row[7],
+        duration=duration,
     )
 
 

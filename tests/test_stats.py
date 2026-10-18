@@ -706,6 +706,7 @@ class TestTotals:
         assert response.status_code == http.HTTPStatus.OK
         assert response.json["runs"] == 0
         assert response.json["cases"] == 0
+        assert response.json["duration"] == 0
 
     def test_sums_across_runs(self, client: flask.testing.FlaskClient, auth_headers: dict) -> None:
         """Add the counts of every matching run together."""
@@ -718,6 +719,23 @@ class TestTotals:
         assert totals["cases"] == TOTAL_CASES * len(RUN_IDS)
         assert totals["passed"] == TOTAL_PASSED * len(RUN_IDS)
         assert totals["duration"] == pytest.approx(TOTAL_DURATION * len(RUN_IDS))
+
+    def test_an_overflowing_duration_sum_is_a_json_500(
+        self, app: flask.Flask, client: flask.testing.FlaskClient, auth_headers: dict
+    ) -> None:
+        """Answer JSON 500 for stored durations whose sum overflows, on any SQLite."""
+        for run_id in ("a", "b"):
+            _ok(client, auth_headers, _payload(run_id=run_id))
+        # The API refuses such durations, so write them outside it.
+        with app.app_context():
+            conn = flask_db.get_db()
+            conn.execute("UPDATE testrun_stats SET duration = 1e308")
+            conn.commit()
+
+        response = client.get("/stats", headers=auth_headers)
+
+        assert response.status_code == http.HTTPStatus.INTERNAL_SERVER_ERROR
+        assert response.json["message"] == "Failed to read testrun stats"
 
     def test_reports_never_run(self, client: flask.testing.FlaskClient, auth_headers: dict) -> None:
         """Without it a caller cannot tell interrupted runs were summed in."""
