@@ -23,6 +23,7 @@ import pytest
 # this class, though it is real at runtime.
 from werkzeug.test import TestResponse  # type: ignore[attr-defined]
 
+from testing_results_cache import common
 from testing_results_cache import flask_db
 from testing_results_cache import stats_api
 from testing_results_cache import stats_cache
@@ -1097,26 +1098,41 @@ class TestStorageFailures:
 
 
 class TestNonFiniteTotals:
-    """Tests for the read-side guard against a duration sum that overflows."""
+    """Tests for the read-side guard against a duration sum that is not finite."""
 
     def test_an_infinite_duration_sum_is_a_json_500(
-        self, app: flask.Flask, client: flask.testing.FlaskClient, auth_headers: dict
+        self, client: flask.testing.FlaskClient, auth_headers: dict
     ) -> None:
-        """Answer JSON 500 rather than emit `Infinity` for rows written outside the API."""
-        with app.app_context():
-            conn = flask_db.get_db()
-            for run_id in ("a", "b"):
-                conn.execute(
-                    "INSERT INTO testrun_stats(project, testrun_name, run_id, step, origin, "
-                    "user_id, timestamp, cases, passed, failed, broken, skipped, never_run, "
-                    "duration, exit_code, filtered, payload) "
-                    "VALUES ('p', 'n', ?, 'main', 'ci', NULL, ?, "
-                    "1, 1, 0, 0, 0, 0, 1e308, 0, 0, '{}')",
-                    (run_id, datetime.now(UTC).strftime(stats_cache.TIMESTAMP_FORMAT)),
-                )
-            conn.commit()
+        """Answer JSON 500 rather than emit `Infinity`.
 
-        response = client.get("/stats", headers=auth_headers)
+        SQLite versions differ on an overflowing SUM: newer ones return inf,
+        3.45 returns NULL. So the totals are given to the guard directly.
+        """
+        totals = common.TestrunStatsTotals(
+            runs=2,
+            cases=2,
+            passed=2,
+            failed=0,
+            broken=0,
+            skipped=0,
+            never_run=0,
+            duration=float("inf"),
+        )
+
+        def _infinite_totals(**_kwargs: object) -> common.TestrunStatsTotals:
+            """Return totals whose duration overflowed.
+
+            Args:
+                _kwargs: The query filters, ignored.
+
+            Returns:
+                The totals.
+            """
+            return totals
+
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(stats_api.stats_cache, "get_totals", _infinite_totals)
+            response = client.get("/stats", headers=auth_headers)
 
         assert response.status_code == http.HTTPStatus.INTERNAL_SERVER_ERROR
         assert response.json["message"] == "Failed to read testrun stats"
