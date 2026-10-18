@@ -10,13 +10,13 @@ the database can reach it. Every run is marked `ci` or `local`.
 
 import fcntl
 import json
+import pathlib as pl
 import shutil
 import sqlite3
 import typing as tp
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
-from pathlib import Path
 
 import click
 import flask
@@ -40,7 +40,7 @@ MAX_CLI_COUNT = 10**9
 EXECUTED_SQL = "cases - skipped"
 # Any origin other than "ci" is shown as "local", so no other value reaches the page.
 SOURCE_SQL = "CASE WHEN origin = 'ci' THEN 'ci' ELSE 'local' END"
-ASSETS_DIR = Path(__file__).parent / "dashboard_static"
+ASSETS_DIR = pl.Path(__file__).parent / "dashboard_static"
 ASSET_FILES = ("index.html", "dashboard.css", "dashboard.js")
 
 
@@ -165,6 +165,14 @@ def _all_time(conn: sqlite3.Connection) -> tp.Tuple[dict, tp.List[dict]]:
         by_key[(name, source)]["submits"] += submits
 
     def total(entries: tp.List[dict]) -> dict:
+        """Sum the counts of the given entries.
+
+        Args:
+            entries: Entries from the per testrun list above.
+
+        Returns:
+            The summed runs, tests, seconds, invocations and submits.
+        """
         return {
             "runs": sum(n["runs"] for n in entries),
             "tests": sum(n["tests"] for n in entries),
@@ -335,7 +343,7 @@ def build(
     return doc
 
 
-def write(folder: Path, data: dict) -> None:
+def write(folder: pl.Path, data: dict) -> None:
     """Replace the dashboard file in one step.
 
     The new file is written next to the old one and renamed over it, so a
@@ -348,7 +356,7 @@ def write(folder: Path, data: dict) -> None:
     common.replace_json(folder / DATA_FILE, data)
 
 
-def rebuild(conn: sqlite3.Connection, folder: Path, impact: tp.Optional[dict] = None) -> None:
+def rebuild(conn: sqlite3.Connection, folder: pl.Path, impact: tp.Optional[dict] = None) -> None:
     """Rebuild the dashboard file, one rebuild at a time.
 
     The lock makes a second rebuild wait and then read the database again,
@@ -377,12 +385,12 @@ def rebuild_for_app(conn: sqlite3.Connection) -> bool:
     config = flask.current_app.config
     if not config.get("DASHBOARD_FOLDER"):
         return False
-    impact = impact_mod.load_section(Path(config["IMPACT_FILE"]))
-    rebuild(conn, Path(config["DASHBOARD_FOLDER"]), impact)
+    impact = impact_mod.load_section(pl.Path(config["IMPACT_FILE"]))
+    rebuild(conn, pl.Path(config["DASHBOARD_FOLDER"]), impact)
     return True
 
 
-def install_assets(folder: Path) -> None:
+def install_assets(folder: pl.Path) -> None:
     """Copy the dashboard page files into the dashboard folder.
 
     Args:
@@ -400,7 +408,7 @@ def build_dashboard_command() -> None:
     if not configured:
         msg = "DASHBOARD_FOLDER is not set in the instance config."
         raise click.ClickException(msg)
-    install_assets(Path(configured))
+    install_assets(pl.Path(configured))
     rebuild_for_app(flask_db.get_db())
     click.echo(f"Dashboard written to {configured}.")
 
@@ -425,7 +433,7 @@ def update_impact_command() -> None:
         # The previous impact file stays as it is.
         msg = f"Could not fetch issues from GitHub: {err}"
         raise click.ClickException(msg) from err
-    impact_mod.save(Path(config["IMPACT_FILE"]), config["IMPACT_OWNER"], issues)
+    impact_mod.save(pl.Path(config["IMPACT_FILE"]), config["IMPACT_OWNER"], issues)
     click.echo(f"Stored {len(issues)} issues.")
     if rebuild_for_app(flask_db.get_db()):
         click.echo("Dashboard rebuilt.")

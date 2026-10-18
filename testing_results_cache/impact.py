@@ -10,13 +10,13 @@ public dashboard document.
 """
 
 import json
+import pathlib as pl
 import re
 import typing as tp
 import urllib.parse
 import urllib.request
 from datetime import UTC
 from datetime import datetime
-from pathlib import Path
 
 from testing_results_cache import common
 
@@ -154,7 +154,7 @@ def fetch(
     return sorted(issues.values(), key=lambda i: (i["opened"], i["number"]), reverse=True)
 
 
-def save(path: Path, owner: str, issues: tp.List[dict]) -> None:
+def save(path: pl.Path, owner: str, issues: tp.List[dict]) -> None:
     """Store the fetched issues in the private impact file.
 
     Args:
@@ -168,7 +168,7 @@ def save(path: Path, owner: str, issues: tp.List[dict]) -> None:
     )
 
 
-def load_section(path: Path) -> tp.Optional[dict]:
+def load_section(path: pl.Path) -> tp.Optional[dict]:
     """Build the dashboard's impact section from the impact file.
 
     Args:
