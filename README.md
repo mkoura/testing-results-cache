@@ -347,6 +347,35 @@ dashboard.example.org {
 The stats come from `cardano-node-tests`, which uploads them at the end of each
 test run when its `ENABLE_TCACHE_STATS` repository variable is set.
 
+### Try the dashboard locally
+
+With the virtual environment active (see [Install](#install)), use a separate
+instance, because `init-db` drops every table:
+
+```sh
+export INSTANCE_PATH="$HOME/tcache-local/instance"
+mkdir -p "$INSTANCE_PATH" "$HOME/tcache-local/site"
+echo "DASHBOARD_FOLDER = '$HOME/tcache-local/site'" > "$INSTANCE_PATH/config.py"
+flask --app testing_results_cache.app:create_app init-db
+flask --app testing_results_cache.app:create_app add-user --username ci
+flask --app testing_results_cache.app:create_app build-dashboard
+flask --app 'testing_results_cache.app:create_app()' --debug run
+```
+
+In a second terminal, serve the page in place of Caddy and open
+`http://localhost:8995/`:
+
+```sh
+python3 -m http.server 8995 --bind 127.0.0.1 --directory "$HOME/tcache-local/site"
+```
+
+The page fills as stats arrive. Upload them with the `curl` example under
+[Per-run test statistics](#per-run-test-statistics), with a recent `timestamp`
+so the run shows in the charts and not only in the all-time totals, or from a
+`cardano-node-tests` checkout with `ENABLE_TCACHE_STATS=true`,
+`TCACHE_BASIC_AUTH=ci:<password>` and `TCACHE_URL=http://127.0.0.1:5000/results`
+set.
+
 ## Run tests
 
 ```sh
