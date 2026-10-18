@@ -4,13 +4,13 @@ import copy
 import fcntl
 import http
 import json
+import pathlib as pl
 import threading
 import time
 import typing as tp
 from datetime import UTC
 from datetime import datetime
 from datetime import timedelta
-from pathlib import Path
 
 import click
 import flask
@@ -373,7 +373,9 @@ class TestBuild:
 class TestWrite:
     """Tests for writing and replacing the dashboard file."""
 
-    def test_rebuild_writes_the_file(self, app: flask.Flask, seeded: dict, tmp_path: Path) -> None:
+    def test_rebuild_writes_the_file(
+        self, app: flask.Flask, seeded: dict, tmp_path: pl.Path
+    ) -> None:
         """Write a document that matches a fresh build."""
         with app.app_context():
             dashboard.rebuild(flask_db.get_db(), tmp_path)
@@ -382,13 +384,14 @@ class TestWrite:
         assert written == _build(app) | {"generated_at": written["generated_at"]}
         assert not (tmp_path / dashboard.TMP_FILE).exists()
 
-    def test_the_file_is_always_whole_while_it_is_replaced(self, tmp_path: Path) -> None:
+    def test_the_file_is_always_whole_while_it_is_replaced(self, tmp_path: pl.Path) -> None:
         """Never let a reader see a missing or half-written file."""
         dashboard.write(tmp_path, {"seq": 0})
         stop = threading.Event()
         bad: tp.List[str] = []
 
         def reader() -> None:
+            """Read the file over and over, recording every failed read."""
             while not stop.is_set():
                 try:
                     json.loads((tmp_path / dashboard.DATA_FILE).read_text())
@@ -408,13 +411,14 @@ class TestWrite:
         app: flask.Flask,
         client: flask.testing.FlaskClient,
         auth_headers: dict,
-        tmp_path: Path,
+        tmp_path: pl.Path,
     ) -> None:
         """Make a rebuild that waited for the lock include rows stored meanwhile."""
         lock = (tmp_path / dashboard.LOCK_FILE).open("a")
         fcntl.flock(lock, fcntl.LOCK_EX)
 
         def second_rebuild() -> None:
+            """Rebuild in a second thread, which must wait for the lock."""
             with app.app_context():
                 dashboard.rebuild(flask_db.get_db(), tmp_path)
 
@@ -437,7 +441,7 @@ class TestUploadHook:
         app: flask.Flask,
         client: flask.testing.FlaskClient,
         auth_headers: dict,
-        tmp_path: Path,
+        tmp_path: pl.Path,
     ) -> None:
         """Rewrite the dashboard file when a folder is configured."""
         app.config["DASHBOARD_FOLDER"] = str(tmp_path)
@@ -450,7 +454,7 @@ class TestUploadHook:
         app: flask.Flask,
         client: flask.testing.FlaskClient,
         auth_headers: dict,
-        tmp_path: Path,
+        tmp_path: pl.Path,
     ) -> None:
         """Do nothing when no dashboard folder is configured."""
         assert app.config["DASHBOARD_FOLDER"] is None
@@ -462,13 +466,14 @@ class TestUploadHook:
         app: flask.Flask,
         client: flask.testing.FlaskClient,
         auth_headers: dict,
-        tmp_path: Path,
+        tmp_path: pl.Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Keep the upload stored and answered with 200 when the rebuild fails."""
         app.config["DASHBOARD_FOLDER"] = str(tmp_path)
 
         def broken(*_args: object) -> None:
+            """Fail the rebuild as if the disk were full."""
             msg = "disk full"
             raise OSError(msg)
 
@@ -483,7 +488,7 @@ class TestCommand:
     """Tests for the build-dashboard command."""
 
     def test_the_command_writes_the_page_and_the_data(
-        self, app: flask.Flask, seeded: dict, tmp_path: Path
+        self, app: flask.Flask, seeded: dict, tmp_path: pl.Path
     ) -> None:
         """Copy the page files and write the data file."""
         assert seeded

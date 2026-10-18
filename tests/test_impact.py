@@ -3,10 +3,10 @@
 import http
 import http.server
 import json
+import pathlib as pl
 import threading
 import typing as tp
 import urllib.parse
-from pathlib import Path
 
 import click
 import flask
@@ -259,7 +259,7 @@ class TestIsBug:
 class TestSection:
     """Tests for the impact section of the dashboard document."""
 
-    def test_summarises_the_stored_issues(self, tmp_path: Path) -> None:
+    def test_summarises_the_stored_issues(self, tmp_path: pl.Path) -> None:
         """Count issues, bugs, open ones, components and months."""
         issues = [
             _stored("cardano-node", 3, "open", "2024-02-01", True),
@@ -282,7 +282,7 @@ class TestSection:
         assert section["owner"] == OWNER
         assert section["latest"] == issues
 
-    def test_caps_the_latest_issues(self, tmp_path: Path) -> None:
+    def test_caps_the_latest_issues(self, tmp_path: pl.Path) -> None:
         """List only the newest issues, however many are stored."""
         issues = [
             _stored("cardano-node", n, "closed", "2024-01-01", False)
@@ -295,7 +295,7 @@ class TestSection:
         assert len(section["latest"]) == impact.LATEST
         assert section["found"] == len(issues)
 
-    def test_no_file_means_no_section(self, tmp_path: Path) -> None:
+    def test_no_file_means_no_section(self, tmp_path: pl.Path) -> None:
         """Return None before any issues were fetched."""
         assert impact.load_section(tmp_path / "missing.json") is None
 
@@ -319,7 +319,7 @@ class TestCommand:
         assert "IMPACT_AUTHORS" in result.output
 
     def test_stores_issues_and_rebuilds_the_dashboard(
-        self, app: flask.Flask, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, app: flask.Flask, tmp_path: pl.Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Save the fetched issues and put them into the dashboard file."""
         app.config.update(
@@ -335,7 +335,7 @@ class TestCommand:
         assert written["impact"]["latest"] == ONE_ISSUE
 
     def test_stores_issues_without_a_dashboard_folder(
-        self, app: flask.Flask, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, app: flask.Flask, tmp_path: pl.Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Store the issues and skip the rebuild when no dashboard folder is set."""
         path = tmp_path / "impact.json"
@@ -348,7 +348,7 @@ class TestCommand:
         assert json.loads(path.read_text())["issues"] == ONE_ISSUE
 
     def test_a_failed_fetch_keeps_the_old_file(
-        self, app: flask.Flask, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, app: flask.Flask, tmp_path: pl.Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Leave the stored issues alone when GitHub cannot be reached."""
         path = tmp_path / "impact.json"
@@ -357,6 +357,7 @@ class TestCommand:
         app.config.update(IMPACT_AUTHORS=["alice"], IMPACT_FILE=str(path))
 
         def unreachable(**_kw: object) -> tp.List[dict]:
+            """Fail the fetch as if GitHub could not be reached."""
             msg = "network is unreachable"
             raise OSError(msg)
 
@@ -371,21 +372,21 @@ class TestConfig:
     """Tests for where the impact settings come from."""
 
     def test_the_token_comes_from_the_environment(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: pl.Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Read the GitHub token from IMPACT_GITHUB_TOKEN when it is set."""
         monkeypatch.setenv("INSTANCE_PATH", str(tmp_path))
         monkeypatch.setenv("IMPACT_GITHUB_TOKEN", "ghp_from_env")
         assert app_module.create_app().config["IMPACT_GITHUB_TOKEN"] == "ghp_from_env"
 
-    def test_no_token_by_default(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_no_token_by_default(self, tmp_path: pl.Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Search without a token when none is configured."""
         monkeypatch.setenv("INSTANCE_PATH", str(tmp_path))
         monkeypatch.delenv("IMPACT_GITHUB_TOKEN", raising=False)
         assert app_module.create_app().config["IMPACT_GITHUB_TOKEN"] is None
 
     def test_the_instance_config_wins(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: pl.Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Let the instance config.py override the environment."""
         monkeypatch.setenv("INSTANCE_PATH", str(tmp_path))
@@ -402,7 +403,7 @@ class TestUploadHook:
         app: flask.Flask,
         client: flask.testing.FlaskClient,
         auth_headers: dict,
-        tmp_path: Path,
+        tmp_path: pl.Path,
     ) -> None:
         """Carry the stored issues into the file a stats upload rebuilds."""
         path = tmp_path / "impact.json"
