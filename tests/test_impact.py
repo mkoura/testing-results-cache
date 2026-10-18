@@ -13,6 +13,7 @@ import pytest
 from click.testing import CliRunner
 from click.testing import Result
 
+from testing_results_cache import app as app_module
 from testing_results_cache import dashboard
 from testing_results_cache import impact
 
@@ -292,6 +293,33 @@ class TestCommand:
         assert result.exit_code != 0
         assert "Could not fetch issues" in result.output
         assert path.read_text() == before
+
+
+class TestConfig:
+    """Tests for where the impact settings come from."""
+
+    def test_the_token_comes_from_the_environment(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Read the GitHub token from IMPACT_GITHUB_TOKEN when it is set."""
+        monkeypatch.setenv("INSTANCE_PATH", str(tmp_path))
+        monkeypatch.setenv("IMPACT_GITHUB_TOKEN", "ghp_from_env")
+        assert app_module.create_app().config["IMPACT_GITHUB_TOKEN"] == "ghp_from_env"
+
+    def test_no_token_by_default(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Search without a token when none is configured."""
+        monkeypatch.setenv("INSTANCE_PATH", str(tmp_path))
+        monkeypatch.delenv("IMPACT_GITHUB_TOKEN", raising=False)
+        assert app_module.create_app().config["IMPACT_GITHUB_TOKEN"] is None
+
+    def test_the_instance_config_wins(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Let the instance config.py override the environment."""
+        monkeypatch.setenv("INSTANCE_PATH", str(tmp_path))
+        monkeypatch.setenv("IMPACT_GITHUB_TOKEN", "ghp_from_env")
+        (tmp_path / "config.py").write_text('IMPACT_GITHUB_TOKEN = "ghp_from_file"\n')
+        assert app_module.create_app().config["IMPACT_GITHUB_TOKEN"] == "ghp_from_file"
 
 
 class TestUploadHook:
