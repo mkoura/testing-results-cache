@@ -30,10 +30,15 @@ def replace_json(path: Path, data: dict) -> None:
     Args:
         path: The file to replace.
         data: The document to write.
+
+    Raises:
+        ValueError: When `data` holds inf or NaN, which JSON cannot carry. The
+            old file is kept.
     """
+    text = json.dumps(data, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
     tmp = path.with_name(f".{path.name}.tmp")
     with tmp.open("w", encoding="utf-8") as f:
-        json.dump(data, f, separators=(",", ":"), ensure_ascii=False)
+        f.write(text)
         f.flush()
         os.fsync(f.fileno())
     tmp.replace(path)
