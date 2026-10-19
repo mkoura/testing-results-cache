@@ -6,6 +6,7 @@ from pathlib import Path
 
 import flask
 
+from testing_results_cache import dashboard
 from testing_results_cache import flask_db
 from testing_results_cache import history_api
 from testing_results_cache import results_api
@@ -44,6 +45,18 @@ def create_app() -> flask.Flask:
         UPLOAD_FOLDER=str(instance_path / "uploads"),
         HISTORY_FOLDER=str(instance_path / "history"),
         SYNC_RESULTS_FOLDER=str(instance_path / "sync_results"),
+        # The public dashboard is off until this is set in the instance config.
+        DASHBOARD_FOLDER=None,
+        # Issues found by our testing: the GitHub logins whose upstream issues count.
+        # Empty turns the dashboard's impact section off.
+        IMPACT_AUTHORS=[],
+        IMPACT_OWNER="IntersectMBO",
+        IMPACT_EXCLUDE_REPOS=["cardano-node-tests", "cardano-sync-tests"],
+        # Issues filed in our own repo for problems found without an upstream issue.
+        IMPACT_LABELLED=[["cardano-node-tests", "upstream bug"]],
+        # Read from the environment so the secret need not sit in a file.
+        IMPACT_GITHUB_TOKEN=os.environ.get("IMPACT_GITHUB_TOKEN") or None,
+        IMPACT_FILE=str(instance_path / "impact.json"),
         MAX_CONTENT_LENGTH=16 * 1000 * 1000,  # 16MB
     )
 
@@ -56,6 +69,8 @@ def create_app() -> flask.Flask:
     app.cli.add_command(flask_db.add_user)
     app.cli.add_command(flask_db.migrate_command)
     app.cli.add_command(flask_db.prune_history_command)
+    app.cli.add_command(dashboard.build_dashboard_command)
+    app.cli.add_command(dashboard.update_impact_command)
 
     app.register_blueprint(results_api.results)
     app.register_blueprint(history_api.history)

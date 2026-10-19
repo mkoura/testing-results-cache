@@ -1,5 +1,8 @@
+import json
+import os
 import re
 from datetime import datetime
+from pathlib import Path
 from typing import List
 from typing import NamedTuple
 from typing import NoReturn
@@ -16,6 +19,29 @@ MAX_PATH_SEGMENT_LENGTH = 200
 # Dots are allowed so real-world testrun names like "node-8.5.0" work, but a
 # segment of dots only ("..", ".") is rejected in `valid_path_segment`.
 _SAFE_SEGMENT_RE = re.compile(r"[A-Za-z0-9_.-]+")
+
+
+def replace_json(path: Path, data: dict) -> None:
+    """Replace a JSON file in one step.
+
+    The new file is written next to the old one, flushed to disk, and renamed
+    over it, so a reader gets either the whole old file or the whole new one.
+
+    Args:
+        path: The file to replace.
+        data: The document to write.
+
+    Raises:
+        ValueError: When `data` holds inf or NaN, which JSON cannot carry. The
+            old file is kept.
+    """
+    text = json.dumps(data, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
+    tmp = path.with_name(f".{path.name}.tmp")
+    with tmp.open("w", encoding="utf-8") as f:
+        f.write(text)
+        f.flush()
+        os.fsync(f.fileno())
+    tmp.replace(path)
 
 
 def abort_json(status_code: int, message: str, headers: dict | None = None) -> NoReturn:

@@ -226,8 +226,7 @@ def list_testrun_stats(
             parsed = _parse_timestamp(row[5])
         except ValueError:
             LOGGER.warning(
-                f"Skipping malformed timestamp {row[5]!r} for run "
-                f"{row[0]}/{row[1]}/{row[2]}/{row[3]}/{row[4]}"
+                "Skipping malformed timestamp %r for run %s/%s/%s/%s/%s", row[5], *row[:5]
             )
             continue
         entries.append(
