@@ -18,6 +18,7 @@ LOGGER = logging.getLogger(__name__)
 
 # Same format as history_cache.py. See history.timestamp in schema.sql.
 TIMESTAMP_FORMAT = "%Y-%m-%d %H:%M:%S.%f"
+MIN_YEAR = 1000
 
 MAX_LIST_ROWS = 1000
 
@@ -52,8 +53,10 @@ def _parse_timestamp(value: str) -> datetime:
 def timestamp_round_trips(value: datetime) -> bool:
     """Check a timestamp survives being written and read back.
 
-    The timestamp comes from the client. `strftime("%Y")` does not zero-pad
-    a year below 1000, and `strptime("%Y")` cannot read it back.
+    The timestamp comes from the client. Python before 3.14 does not zero-pad
+    a year below 1000 in `strftime("%Y")`, and `strptime("%Y")` cannot read
+    it back, so such a year is refused on every version to keep the stored
+    format the same everywhere.
 
     Args:
         value: The tz-aware UTC timestamp a client sent.
@@ -61,6 +64,8 @@ def timestamp_round_trips(value: datetime) -> bool:
     Returns:
         True when the value survives being formatted and parsed again.
     """
+    if value.year < MIN_YEAR:
+        return False
     try:
         return _parse_timestamp(_format_timestamp(value)) == value
     except (ValueError, OverflowError):
