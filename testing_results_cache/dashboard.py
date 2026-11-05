@@ -6,6 +6,10 @@ folder. The file is built from the fields listed here, so nothing else from
 the database can reach it. Every run is marked `ci` or `local`.
 
 "Tests" always means tests that ran: the total minus the skipped ones.
+
+Sync runs, uploaded by cardano-sync-tests, are two more test types, node
+sync and db-sync. Their duration is the sync time. The `sync` section adds
+the network and version detail the other types do not have.
 """
 
 import fcntl
@@ -33,6 +37,10 @@ LATEST_RUNS = 50
 CI = "ci"
 LOCAL = "local"
 MAIN_STEP = "main"
+SYNC_PROJECT = "cardano-sync-tests"
+SYNC_KINDS = ("node", "dbsync")
+SYNC_NAME_PARTS = 3
+SYNC_TYPES = {"node": "node-sync", "dbsync": "db-sync"}
 DATA_FILE = "dashboard.json"
 LOCK_FILE = ".dashboard.lock"
 MAX_VERSION_LENGTH = 64
@@ -74,17 +82,18 @@ def _payload(raw: str) -> dict:
     return doc if isinstance(doc, dict) else {}
 
 
-def _version(doc: dict) -> tp.Optional[str]:
-    """Read the cardano-node version from an upload document.
+def _version(doc: dict, name: str = "cardano_node") -> tp.Optional[str]:
+    """Read a software version from an upload document.
 
     Args:
         doc: The parsed upload document.
+        name: The key under `versions`, cardano-node by default.
 
     Returns:
         The version, or None when it is missing or not a short string.
     """
     versions = doc.get("versions")
-    value = versions.get("cardano_node") if isinstance(versions, dict) else None
+    value = versions.get(name) if isinstance(versions, dict) else None
     if isinstance(value, str) and 0 < len(value) <= MAX_VERSION_LENGTH:
         return value
     return None
@@ -146,17 +155,17 @@ def _all_time(conn: sqlite3.Connection) -> tp.Tuple[dict, tp.List[dict]]:
         f"SELECT testrun_name, {SOURCE_SQL} AS source, "
         "COUNT(DISTINCT project || '/' || run_id || '/' || origin), "
         f"COALESCE(SUM({EXECUTED_SQL}),0), SUM(duration), "
-        "MIN(timestamp), MAX(timestamp), MAX(step != ?) "
+        "MIN(timestamp), MAX(timestamp), MAX(step != ?), MAX(project = ?) "
         "FROM testrun_stats GROUP BY testrun_name, source ORDER BY testrun_name, source",
-        (MAIN_STEP,),
+        (MAIN_STEP, SYNC_PROJECT),
     )
     names = []
-    for name, source, runs, tests, seconds, first, last, upgrade in cur.fetchall():
+    for name, source, runs, tests, seconds, first, last, upgrade, is_sync in cur.fetchall():
         names.append(
             {
                 "name": name,
                 "source": source,
-                "type": "upgrade" if upgrade else "regression",
+                "type": _run_type(name, is_sync=bool(is_sync), upgrade=bool(upgrade)),
                 "release": False,
                 "runs": runs,
                 "tests": tests,
@@ -241,6 +250,7 @@ def _window_runs(conn: sqlite3.Connection, since: datetime) -> tp.List[dict]:
                 "tests": 0,
                 "seconds": 0.0,
                 "node": None,
+                "db_sync": None,
                 "invocations": 0,
                 "submits": 0,
             }
@@ -249,6 +259,7 @@ def _window_runs(conn: sqlite3.Connection, since: datetime) -> tp.List[dict]:
         run["seconds"] += duration
         # Rows come oldest first, so the last step's values win.
         run["node"] = _version(doc) or run["node"]
+        run["db_sync"] = _version(doc, "cardano_db_sync") or run["db_sync"]
         invocations, submits = _cli(doc)
         run["invocations"] += invocations
         run["submits"] += submits
@@ -292,6 +303,85 @@ def _releases(conn: sqlite3.Connection) -> tp.List[dict]:
         for e in releases.values()
     ]
     return sorted(out, key=lambda e: e["last"], reverse=True)
+
+
+def _sync_name(name: str) -> tp.Tuple[str, str]:
+    """Split a sync testrun name, `sync-<kind>-<network>`, into its two parts.
+
+    Args:
+        name: The stored testrun name.
+
+    Returns:
+        Tuple of (kind, network). A name of another shape gives `other`.
+    """
+    parts = name.split("-", 2)
+    if len(parts) == SYNC_NAME_PARTS and parts[0] == "sync" and parts[1] in SYNC_KINDS:
+        return parts[1], parts[2]
+    return "other", "other"
+
+
+def _run_type(name: str, is_sync: bool, upgrade: bool) -> str:
+    """Name the test type of a testrun.
+
+    Args:
+        name: The stored testrun name.
+        is_sync: Whether the rows come from cardano-sync-tests.
+        upgrade: Whether any row has a step other than the main one.
+
+    Returns:
+        `node-sync` or `db-sync` for a sync run, else `upgrade` or `regression`.
+    """
+    if is_sync:
+        kind, _network = _sync_name(name)
+        return SYNC_TYPES.get(kind, "node-sync")
+    return "upgrade" if upgrade else "regression"
+
+
+def _sync(conn: sqlite3.Connection, since: datetime) -> dict:
+    """List the sync runs inside the window, newest first.
+
+    Args:
+        conn: An open database connection.
+        since: The start of the window, tz-aware UTC.
+
+    Returns:
+        The window's sync runs with their network, versions and sync time.
+        The list is not cut: the page sums its tiles from it.
+    """
+    cur = conn.execute(
+        f"SELECT run_id, origin, {SOURCE_SQL}, testrun_name, timestamp, duration, exit_code, "
+        "payload FROM testrun_stats WHERE project = ? ORDER BY timestamp",
+        (SYNC_PROJECT,),
+    )
+    runs: tp.Dict[tp.Tuple[str, str, str], dict] = {}
+    for run_id, origin, source, name, stamp, duration, exit_code, raw in cur.fetchall():
+        kind, network = _sync_name(name)
+        doc = _payload(raw)
+        key = (name, run_id, origin)
+        run = runs.get(key)
+        if run is None:
+            run = runs[key] = {
+                "started": _timestamp(stamp),
+                "kind": kind,
+                "network": network,
+                "source": source,
+                "seconds": 0.0,
+                "completed": True,
+                "node": None,
+                "db_sync": None,
+            }
+        run["seconds"] += duration
+        # A sync that stopped early reports the session time, not a sync time.
+        run["completed"] = run["completed"] and exit_code == 0
+        run["node"] = _version(doc) or run["node"]
+        run["db_sync"] = _version(doc, "cardano_db_sync") or run["db_sync"]
+    return {
+        "runs": [
+            {**e, "started": e["started"].isoformat(), "seconds": round(e["seconds"], 1)}
+            for e in sorted(runs.values(), key=lambda e: e["started"], reverse=True)
+            if e["started"] >= since
+        ],
+    }
 
 
 def build(
@@ -342,6 +432,7 @@ def build(
             "tests": run["tests"],
             "seconds": round(run["seconds"], 1),
             "node": run["node"],
+            "db_sync": run["db_sync"],
         }
         for run in sorted(runs, key=lambda r: r["started"], reverse=True)[:LATEST_RUNS]
     ]
@@ -358,6 +449,7 @@ def build(
         ],
         "latest": latest,
         "releases": _releases(conn),
+        "sync": _sync(conn, since),
     }
     if impact is not None:
         doc["impact"] = impact
