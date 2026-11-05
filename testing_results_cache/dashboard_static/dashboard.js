@@ -6,12 +6,15 @@
   const DAY_MS = 86400000;
   const LATEST_ROWS = 12;
   const THEME_KEY = "cardano-test-runs-theme";
+  const SYNC_TYPES = ["node-sync", "db-sync"];
+  const TYPE_LABELS = { regression: "Regression", upgrade: "Upgrade", "node-sync": "Node sync", "db-sync": "db-sync" };
   const SVG = "http://www.w3.org/2000/svg";
 
   let data = null;
   let days = 30;
   let kind = "all";
   let source = "all";
+  let network = "all";
   let only = null;
 
   // Small DOM helpers. Data is only ever set as text, never as markup.
@@ -138,7 +141,7 @@
   function typeCell(e, steps) {
     const c = h("td");
     const t = typeOf(e.name);
-    c.append(h("span", `tag t-${t}`, t === "upgrade" ? "Upgrade" : "Regression"));
+    c.append(h("span", `tag t-${t}`, TYPE_LABELS[t] || t));
     if (steps > 1) c.append(h("span", "steps", `${steps} steps`));
     if (e.source === "local") c.append(h("span", "tag local", "Local"));
     else if (isRelease(e.name)) c.append(h("span", "tag release", "Release"));
@@ -240,6 +243,62 @@
     }));
   }
 
+  function renderSync(start) {
+    const panel = byId("sync");
+    const sync = data.sync;
+    const usable = sync && Array.isArray(sync.runs);
+    const anySync = data.test_runs.some((e) => SYNC_TYPES.includes(e.type));
+    const onlyType = only ? typeOf(only.slice(0, only.lastIndexOf("|"))) : null;
+    const hidden = !usable || !anySync || (kind !== "all" && !SYNC_TYPES.includes(kind)) || (only && !SYNC_TYPES.includes(onlyType));
+    panel.hidden = hidden;
+    if (hidden) return;
+    const typeOfRun = (r) => (r.kind === "dbsync" ? "db-sync" : "node-sync");
+    const nameOf = (r) => `sync-${r.kind}-${r.network}`;
+    const runs = sync.runs.filter((r) => r.started.slice(0, 10) >= start && sourceMatch(r)
+      && (network === "all" || r.network === network)
+      && (kind === "all" || typeOfRun(r) === kind)
+      && (!only || keyOf({ name: nameOf(r), source: r.source }) === only));
+    const count = (list, f) => list.filter(f).length;
+    const seconds = (list) => list.reduce((s, r) => s + r.seconds, 0);
+    const nodeRuns = count(runs, (r) => r.kind === "node");
+    const dbsyncRuns = count(runs, (r) => r.kind === "dbsync");
+    const mainnet = runs.filter((r) => r.network === "mainnet");
+    const byNetwork = new Map();
+    for (const r of runs) if (r.network !== "mainnet") byNetwork.set(r.network, (byNetwork.get(r.network) || 0) + 1);
+
+    byId("y-runs").textContent = fmt(runs.length);
+    byId("y-runs-hint").textContent = `${fmt(nodeRuns)} node sync · ${fmt(dbsyncRuns)} db-sync`;
+    byId("y-time").textContent = dur(seconds(runs));
+    byId("y-time-hint").textContent = `${dur(seconds(runs.filter((r) => r.kind === "node")))} node · ${dur(seconds(runs.filter((r) => r.kind === "dbsync")))} db-sync`;
+    byId("y-mainnet").textContent = fmt(mainnet.length);
+    byId("y-mainnet-hint").textContent = [...byNetwork].map(([n, c]) => `${fmt(c)} ${n}`).join(" · ") || "no other network";
+    const latestMainnet = mainnet.find((r) => r.kind === "node" && r.completed);
+    byId("y-latest").textContent = latestMainnet ? dur(latestMainnet.seconds) : "–";
+    byId("y-latest-hint").textContent = latestMainnet ? `cardano-node ${latestMainnet.node || "?"} · ${latestMainnet.started.slice(0, 10)}` : "no mainnet node sync in this window";
+
+    // All-time figures under the same filters, from the per test run totals.
+    const allTime = data.test_runs.filter((e) => SYNC_TYPES.includes(e.type) && filterMatch(e)
+      && (network === "all" || e.name.endsWith(`-${network}`)));
+    const atSum = (list, k) => list.reduce((s, e) => s + e[k], 0);
+    byId("y-runs-all").textContent = `${fmt(atSum(allTime, "runs"))} all time`;
+    byId("y-time-all").textContent = `${dur(atSum(allTime, "seconds"))} all time`;
+    byId("y-mainnet-all").textContent = `${fmt(atSum(allTime.filter((e) => e.name.endsWith("-mainnet")), "runs"))} all time`;
+    byId("y-latest-all").textContent = `${fmt(atSum(allTime.filter((e) => e.type === "node-sync"), "runs"))} node syncs all time`;
+
+    const ref = Date.parse(data.generated_at.slice(0, 10));
+    const perDay = [];
+    for (let i = days - 1; i >= 0; i -= 1) {
+      const date = dateOf(ref - i * DAY_MS);
+      const today = runs.filter((r) => r.started.slice(0, 10) === date);
+      const hours = (net) => today.filter((r) => r.network === net).reduce((s, r) => s + r.seconds, 0) / 3600;
+      perDay.push({ date, mainnet: hours("mainnet"), preview: hours("preview"), preprod: hours("preprod") });
+    }
+    bars(byId("chart-sync-hours"), perDay, ["mainnet", "preview", "preprod"], (k) => `${k} sync hours`);
+    const trend = mainnet.filter((r) => r.kind === "node" && r.completed).reverse().map((r) => ({ date: r.started.slice(0, 10), hours: r.seconds / 3600 }));
+    line(byId("chart-sync-trend"), trend.length ? trend : [{ date: dateOf(ref), hours: null }], "hours", { cls: "lineS", dot: "endpt", area: true, zero: true });
+
+  }
+
   function renderStatic() {
     const releases = data.releases.map((r) => {
       const li = h("li");
@@ -261,15 +320,20 @@
     const daily = windowDaily.filter(filterMatch);
 
     const onlyLabel = only ? only.replace(/\|ci$/, "").replace(/\|local$/, " (local)") : null;
-    byId("heading").textContent = onlyLabel || (kind === "all" ? "Cardano testing at a glance" : kind === "upgrade" ? "Upgrade testing" : "Regression testing");
+    byId("heading").textContent = onlyLabel || (kind === "all" ? "Cardano testing at a glance" : `${TYPE_LABELS[kind]} testing`);
+    // The "What we test" cards follow the selected type, or the selected test run's type.
+    const shownType = only ? typeOf(only.slice(0, only.lastIndexOf("|"))) : kind;
+    for (const card of document.querySelectorAll("[data-about]")) {
+      card.hidden = shownType !== "all" && !card.dataset.about.split(" ").includes(shownType);
+    }
     byId("subheading").textContent = `Last ${days} days · ${source === "all" ? "CI and local runs" : source === "ci" ? "CI runs" : "local runs"}`;
 
     const sum = (list, k) => list.reduce((s, d) => s + d[k], 0);
     const runs = sum(daily, "runs");
-    const upgradeRuns = sum(daily.filter((d) => typeOf(d.name) === "upgrade"), "runs");
+    const byType = (type) => sum(daily.filter((d) => typeOf(d.name) === type), "runs");
     const localRuns = sum(daily.filter((d) => d.source === "local"), "runs");
     byId("t-runs").textContent = fmt(runs);
-    byId("t-runs-hint").textContent = `${fmt(runs - upgradeRuns)} regression · ${fmt(upgradeRuns)} upgrade · ${fmt(localRuns)} local`;
+    byId("t-runs-hint").textContent = `${fmt(byType("regression"))} regression · ${fmt(byType("upgrade"))} upgrade · ${fmt(byType("node-sync"))} node sync · ${fmt(byType("db-sync"))} db-sync · ${fmt(localRuns)} local`;
     byId("t-cases").textContent = fmt(sum(daily, "tests"));
     byId("t-time").textContent = dur(sum(daily, "seconds"));
 
@@ -298,12 +362,14 @@
         date,
         regression: sum(today.filter((d) => typeOf(d.name) === "regression"), "runs"),
         upgrade: sum(today.filter((d) => typeOf(d.name) === "upgrade"), "runs"),
+        "node-sync": sum(today.filter((d) => typeOf(d.name) === "node-sync"), "runs"),
+        "db-sync": sum(today.filter((d) => typeOf(d.name) === "db-sync"), "runs"),
         tests,
         cumul: running,
         suite: suiteCandidates.length ? Math.max(...suiteCandidates.map((d) => d.tests / d.runs)) : null,
       });
     }
-    bars(byId("chart-runs"), rows, ["regression", "upgrade"], (k) => `${k} runs`);
+    bars(byId("chart-runs"), rows, ["regression", "upgrade", "node-sync", "db-sync"], (k) => `${TYPE_LABELS[k].toLowerCase()} runs`);
     bars(byId("chart-tests"), rows, ["tests"], () => "tests");
     line(byId("chart-cumul"), rows, "cumul", { cls: "lineA", dot: "endptA", area: false });
     line(byId("chart-suite"), rows, "suite", { cls: "lineS", dot: "endpt", area: true });
@@ -332,11 +398,13 @@
       .slice(0, LATEST_ROWS)
       .map((r) => {
         const tr = h("tr");
+        const versions = [r.node, r.db_sync ? `db-sync ${r.db_sync}` : null].filter(Boolean).join(" · ") || "–";
         tr.append(h("td", "mono", stamp(r.started)), h("td", "", r.name), typeCell(r, r.steps),
-          h("td", "mono", r.node || "–"), h("td", "num", fmt(r.tests)), h("td", "num", dur(r.seconds)));
+          h("td", "mono", versions), h("td", "num", fmt(r.tests)), h("td", "num", dur(r.seconds)));
         return tr;
       });
     byId("latest").replaceChildren(...(latest.length ? latest : noRows(6)));
+    renderSync(start);
     renderUpdated();
   }
 
@@ -401,6 +469,7 @@
   wire("[data-days]", "days", (v) => { days = Number(v); });
   wire("[data-kind]", "kind", (v) => { kind = v; });
   wire("[data-source]", "source", (v) => { source = v; });
+  wire("[data-network]", "network", (v) => { network = v; });
 
   load();
   setInterval(() => { if (document.visibilityState === "visible") load(); }, REFRESH_MS);

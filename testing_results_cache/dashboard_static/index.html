@@ -22,10 +22,12 @@
 
     <div class="ctl">
       <span class="ctl-label">Test type</span>
-      <div class="seg" role="group" aria-label="Test type">
+      <div class="seg wrap" role="group" aria-label="Test type">
         <button type="button" id="k-all" data-kind="all" aria-pressed="true">All</button>
         <button type="button" id="k-reg" data-kind="regression" aria-pressed="false">Regression</button>
         <button type="button" id="k-upg" data-kind="upgrade" aria-pressed="false">Upgrade</button>
+        <button type="button" id="k-nodesync" data-kind="node-sync" aria-pressed="false">Node sync</button>
+        <button type="button" id="k-dbsync" data-kind="db-sync" aria-pressed="false">db-sync</button>
       </div>
     </div>
 
@@ -67,13 +69,55 @@
     </section>
 
     <section class="about-tests" aria-label="What we test">
-      <div class="card">
+      <div class="card" data-about="regression">
         <h3>Regression testing</h3>
         <p>End-to-end tests of cardano-node and cardano-cli on a local Cardano testnet. They run every night against the latest node from the master branch, in several setups, and on demand for each node release.</p>
       </div>
-      <div class="card">
+      <div class="card" data-about="upgrade">
         <h3>Upgrade testing</h3>
         <p>One run in three steps. Step 1 starts a cluster on the released node and runs the tests. Step 2 upgrades all nodes but one pool, so old and new versions run side by side, and runs the tests again. Step 3 completes the upgrade, with a hard fork when one is due, and runs them a third time.</p>
+      </div>
+      <div class="card" data-about="node-sync db-sync">
+        <h3>Sync testing</h3>
+        <p>A full sync of a Cardano network from genesis on one machine, with the time per era, memory and CPU recorded. Node sync runs the node alone. db-sync also runs cardano-db-sync against that node, starting once the node has reached the Shelley era, and syncs the database as well.</p>
+      </div>
+    </section>
+
+    <section class="panel" id="sync" aria-label="Sync tests" hidden>
+      <div class="impact-head">
+        <h2>Sync tests</h2>
+        <span class="foot">Sync time by network, and how long a mainnet sync takes per node release</span>
+      </div>
+      <section class="tiles sync-tiles" aria-label="Sync totals">
+        <div class="tile"><span class="label">Sync runs</span><span class="value" id="y-runs">–</span><span class="hint" id="y-runs-hint"></span><span class="hint all" id="y-runs-all"></span></div>
+        <div class="tile"><span class="label">Sync time</span><span class="value" id="y-time">–</span><span class="hint" id="y-time-hint"></span><span class="hint all" id="y-time-all"></span></div>
+        <div class="tile"><span class="label">Mainnet syncs</span><span class="value" id="y-mainnet">–</span><span class="hint" id="y-mainnet-hint"></span><span class="hint all" id="y-mainnet-all"></span></div>
+        <div class="tile"><span class="label">Latest mainnet sync</span><span class="value" id="y-latest">–</span><span class="hint" id="y-latest-hint"></span><span class="hint all" id="y-latest-all"></span></div>
+      </section>
+      <div class="ctl sync-ctl">
+        <span class="ctl-label">Network</span>
+        <div class="seg" role="group" aria-label="Network">
+          <button type="button" id="n-all" data-network="all" aria-pressed="true">All</button>
+          <button type="button" id="n-mainnet" data-network="mainnet" aria-pressed="false">Mainnet</button>
+          <button type="button" id="n-preview" data-network="preview" aria-pressed="false">Preview</button>
+          <button type="button" id="n-preprod" data-network="preprod" aria-pressed="false">Preprod</button>
+        </div>
+      </div>
+      <div class="row2 sync-charts">
+        <div>
+          <h2>Sync hours per day</h2>
+          <ul class="legend" aria-hidden="true">
+            <li><span class="sw mainnet"></span>Mainnet</li>
+            <li><span class="sw preview"></span>Preview</li>
+            <li><span class="sw preprod"></span>Preprod</li>
+          </ul>
+          <div id="chart-sync-hours" role="img" aria-label="Sync hours per day, by network"></div>
+        </div>
+        <div>
+          <h2>Mainnet sync time per run</h2>
+          <p class="foot">Hours to sync mainnet from genesis, one point per node sync run, newest last.</p>
+          <div id="chart-sync-trend" role="img" aria-label="Mainnet sync hours per run"></div>
+        </div>
       </div>
     </section>
 
@@ -120,6 +164,8 @@
         <ul class="legend" aria-hidden="true">
           <li><span class="sw regression"></span>Regression</li>
           <li><span class="sw upgrade"></span>Upgrade</li>
+          <li><span class="sw node-sync"></span>Node sync</li>
+          <li><span class="sw db-sync"></span>db-sync</li>
         </ul>
         <div id="chart-runs" role="img" aria-label="Test runs per day, by test type"></div>
       </section>
@@ -173,7 +219,7 @@
               <th scope="col">Started (UTC)</th>
               <th scope="col">Test run</th>
               <th scope="col">Type</th>
-              <th scope="col">Node</th>
+              <th scope="col">Versions</th>
               <th scope="col" class="num">Tests executed</th>
               <th scope="col" class="num">Duration</th>
             </tr>
@@ -197,6 +243,7 @@
         <div><dt>Upgrade</dt><dd>One run in three steps across a node upgrade. It counts as one run; its tests are the sum of the three steps.</dd></div>
         <div><dt>Tests executed</dt><dd>Every test that ran, in every run and step. Skipped tests are not counted.</dd></div>
         <div><dt>CLI invocations</dt><dd>How many times the tests ran a cardano-cli command, and how many transactions they submitted.</dd></div>
+        <div><dt>Sync tests</dt><dd>One run is one full sync of a network, by the node alone or with db-sync. Its test time is the sync time. It counts in the numbers above like any other run.</dd></div>
       </dl>
       <p class="foot">CI runs come from GitHub Actions. Local runs are uploaded by developers from their own machines. The page checks for new data every 60 seconds.</p>
     </section>
