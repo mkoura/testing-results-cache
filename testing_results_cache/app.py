@@ -9,6 +9,7 @@ import flask
 from testing_results_cache import flask_db
 from testing_results_cache import history_api
 from testing_results_cache import results_api
+from testing_results_cache import stats_api
 from testing_results_cache import sync_results_api
 
 INSTANCE_PATH = Path(__file__).parent.parent / "instance_dev"
@@ -59,6 +60,7 @@ def create_app() -> flask.Flask:
     app.register_blueprint(results_api.results)
     app.register_blueprint(history_api.history)
     app.register_blueprint(sync_results_api.sync_results)
+    app.register_blueprint(stats_api.stats)
 
     @app.errorhandler(413)
     def _request_entity_too_large(_exc: Exception) -> flask.Response:

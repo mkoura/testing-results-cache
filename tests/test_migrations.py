@@ -14,7 +14,8 @@ import pytest
 
 from testing_results_cache import migrations_runner
 
-# The two migrations this repo ships.
+# The two migrations the `migrations` fixture below creates - not the count
+# this repo ships (see tests/test_cli.py for that one).
 SHIPPED_MIGRATIONS = 2
 SEVENTH = 7
 
