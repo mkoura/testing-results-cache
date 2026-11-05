@@ -16,6 +16,7 @@ import flask
 from werkzeug.exceptions import HTTPException
 
 from testing_results_cache import common
+from testing_results_cache import dashboard
 from testing_results_cache import flask_auth
 from testing_results_cache import flask_db
 from testing_results_cache import stats_cache
@@ -53,7 +54,7 @@ def _rollback(conn: sqlite3.Connection, run_id: str) -> None:
         conn.rollback()
     except sqlite3.Error:
         flask.current_app.logger.warning(
-            f"Rollback failed for stats upload {run_id}", exc_info=True
+            "Rollback failed for stats upload %s", run_id, exc_info=True
         )
 
 
@@ -66,7 +67,7 @@ def _abort_storage_failure(run_id: str) -> tp.NoReturn:
     Raises:
         HTTPException: Always, carrying a JSON 500 body.
     """
-    flask.current_app.logger.exception(f"Failed to store testrun stats for run {run_id}")
+    flask.current_app.logger.exception("Failed to store testrun stats for run %s", run_id)
     common.abort_json(500, "Failed to store testrun stats")
 
 
@@ -79,7 +80,7 @@ def _abort_read_failure(context: str) -> tp.NoReturn:
     Raises:
         HTTPException: Always, carrying a JSON 500 body.
     """
-    flask.current_app.logger.exception(f"Failed to read testrun stats ({context})")
+    flask.current_app.logger.exception("Failed to read testrun stats (%s)", context)
     common.abort_json(500, "Failed to read testrun stats")
 
 
@@ -450,6 +451,20 @@ def _entry_dict(entry: common.TestrunStatsEntry) -> dict:
     }
 
 
+def _rebuild_dashboard(conn: sqlite3.Connection) -> None:
+    """Rebuild the public dashboard file, when a dashboard folder is configured.
+
+    A failure is logged and never fails the upload, which is already stored.
+
+    Args:
+        conn: The connection the upload was stored with.
+    """
+    try:
+        dashboard.rebuild_for_app(conn)
+    except Exception:
+        flask.current_app.logger.exception("Failed to rebuild the dashboard")
+
+
 @stats.route("/stats", methods=["PUT", "POST"])
 @flask_auth.auth.login_required
 def upload_stats() -> dict:
@@ -503,12 +518,14 @@ def upload_stats() -> dict:
         _rollback(conn, run_id)
         # The low byte also matches extended codes such as SQLITE_BUSY_SNAPSHOT.
         if getattr(exc, "sqlite_errorcode", 0) & 0xFF == sqlite3.SQLITE_BUSY:
-            flask.current_app.logger.warning(f"Stats upload for run {run_id} hit database lock")
+            flask.current_app.logger.warning("Stats upload for run %s hit database lock", run_id)
             common.abort_json(503, "Server busy, try again", headers={"Retry-After": "5"})
         _abort_storage_failure(run_id)
     except Exception:
         _rollback(conn, run_id)
         _abort_storage_failure(run_id)
+
+    _rebuild_dashboard(conn)
 
     return {
         "project": project,
@@ -544,8 +561,9 @@ def get_totals() -> dict:
     # An infinite float would be emitted as `Infinity`, which is not JSON.
     if not math.isfinite(totals.duration):
         flask.current_app.logger.error(
-            "SUM(duration) is not finite - a stored row is out of range "
-            f"(project={project!r}, days={days!r})"
+            "SUM(duration) is not finite - a stored row is out of range (project=%r, days=%r)",
+            project,
+            days,
         )
         common.abort_json(500, "Failed to read testrun stats")
 
