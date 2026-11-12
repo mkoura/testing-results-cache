@@ -291,6 +291,108 @@ curl -u stats:token 'http://localhost:5000/stats/runs?project=cardano-node-tests
 The totals include a derived `other` count. A non-zero `never_run` means
 interrupted runs are included, so the totals are a lower bound.
 
+## Public dashboard
+
+A public page shows how much testing runs: test runs, tests executed, test
+time and CLI invocations, releases tested, and the issues our testing found
+upstream. It shows no pass or fail results. The page itself lives in the
+`cardano-node-tests` repository and is served by its GitHub Pages site. This
+service publishes only the page's data, `dashboard.json`, and it is off until
+`DASHBOARD_FOLDER` is set.
+
+After each stats upload, tcache rewrites `dashboard.json` in that folder. The
+web server serves the folder as static files, so visitors never reach the
+app. Keep the folder outside the instance directory, because everything in it
+is public.
+
+Turn it on in `$INSTANCE_PATH/config.py`:
+
+```python
+DASHBOARD_FOLDER = "/srv/tcache-dashboard"
+# GitHub logins whose upstream issues count as found by our testing.
+IMPACT_AUTHORS = ["mkoura", "ArturWieczorek", "OlufemiAdeOlusile", "saratomaz"]
+```
+
+The other impact settings have defaults: `IMPACT_OWNER` (`"IntersectMBO"`,
+the organisation whose public repositories are searched),
+`IMPACT_EXCLUDE_REPOS` (our own test repositories, left out of the search),
+`IMPACT_LABELLED` (`[["cardano-node-tests", "upstream bug"]]`, repositories
+and labels of issues filed by us for problems with no upstream issue) and
+`IMPACT_FILE` (where the fetched issues are stored, in the instance folder).
+
+Build the data once, so the file exists before the first upload:
+
+```sh
+flask --app testing_results_cache.app:create_app build-dashboard
+```
+
+Fetch the issues found by our testing from GitHub and rebuild the data. Nothing
+runs this for you: put it in a daily cron job or systemd timer. Only public
+repositories are searched. A read-only GitHub token raises the search rate
+limit. Set it in the `IMPACT_GITHUB_TOKEN` environment variable rather than in
+`config.py`:
+
+```sh
+IMPACT_GITHUB_TOKEN=<token> flask --app testing_results_cache.app:create_app update-impact
+```
+
+If GitHub cannot be reached, the command exits non-zero and the stored issues
+stay as they were.
+
+Serve the folder with Caddy. The page fetches the file from another origin, so
+allow that origin. Hide the dot files, which are the lock and the temporary
+file used while the data is replaced:
+
+```caddyfile
+dashboard.example.org {
+    root * /srv/tcache-dashboard
+    encode gzip
+    header {
+        Access-Control-Allow-Origin https://tests.cardano.intersectmbo.org
+        X-Content-Type-Options nosniff
+        Referrer-Policy no-referrer
+    }
+    file_server {
+        hide .*
+    }
+}
+```
+
+The page's data URL must point at this site. The stats come from
+`cardano-node-tests`, which uploads them at the end of each test run when its
+`ENABLE_TCACHE_STATS` repository variable is set.
+
+### Try the dashboard locally
+
+With the virtual environment active (see [Install](#install)), use a separate
+instance, because `init-db` drops every table:
+
+```sh
+export INSTANCE_PATH="$HOME/tcache-local/instance"
+mkdir -p "$INSTANCE_PATH" "$HOME/tcache-local/site"
+echo "DASHBOARD_FOLDER = '$HOME/tcache-local/site'" > "$INSTANCE_PATH/config.py"
+flask --app testing_results_cache.app:create_app init-db
+flask --app testing_results_cache.app:create_app add-user --username ci
+flask --app testing_results_cache.app:create_app build-dashboard
+flask --app 'testing_results_cache.app:create_app()' --debug run
+```
+
+Copy the page from a `cardano-node-tests` checkout
+(`src_docs/source/extra/dashboard/`) into the same folder, set the `content`
+of the `dashboard-data` meta tag in its `index.html` to `dashboard.json`, then
+serve the folder in a second terminal and open `http://localhost:8995/`:
+
+```sh
+python3 -m http.server 8995 --bind 127.0.0.1 --directory "$HOME/tcache-local/site"
+```
+
+The page fills as stats arrive. Upload them with the `curl` example under
+[Per-run test statistics](#per-run-test-statistics), with a recent `timestamp`
+so the run shows in the charts and not only in the all-time totals, or from a
+`cardano-node-tests` checkout with `ENABLE_TCACHE_STATS=true`,
+`TCACHE_BASIC_AUTH=ci:<password>` and `TCACHE_URL=http://127.0.0.1:5000/results`
+set.
+
 ## Run tests
 
 ```sh
