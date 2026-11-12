@@ -360,7 +360,10 @@ dashboard.example.org {
 
 The page's data URL must point at this site. The stats come from
 `cardano-node-tests`, which uploads them at the end of each test run when its
-`ENABLE_TCACHE_STATS` repository variable is set.
+`ENABLE_TCACHE_STATS` repository variable is set. `cardano-sync-tests` uploads
+its runs the same way. They count as two more test types, node sync and
+db-sync, with the sync time as their test time, and the "Sync tests" panel
+adds the network and version detail.
 
 ### Try the dashboard locally
 
