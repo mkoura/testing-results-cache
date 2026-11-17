@@ -205,37 +205,47 @@ history folder needs to stay bounded.
 
 ## Sync-test results cache
 
-Separate again from `/results` and `/history`: caches a zip of cardano-sync-tests
-results (JSON metrics plus rendered graphs) per cardano-node version, with no
-parsing. Unlike `/history`, there is only ever one entry per version - a new
-upload for a version replaces whatever was stored for it before, rather than
-being rejected as a duplicate. Entries for older versions are never pruned
-automatically; remove old rows/files manually if disk space becomes a
+Separate again from `/results` and `/history`: caches the results zip of one
+cardano-sync-tests run per row. A run is the cardano-node version in the URL
+plus two form fields, `environment` (the network, such as `mainnet`) and
+`started` (when the sync started, ISO 8601 with a UTC offset). A new upload
+for the same run replaces whatever was stored for it before, rather than
+being rejected as a duplicate; a second run of a version, or the same version
+on another network, is a second row. The upload stores the zip as it is. The
+[sync analyzer](#sync-analyzer) reads it afterwards.
+
+The zip is stored as `<id>.zip` under the sync-results folder, where `<id>` is
+the row id the upload answers with. Migration `004_sync_runs.sql` carries rows
+from before it over as mainnet runs started at their upload time; their zips
+are named `<version>.zip` and must be renamed to `<id>.zip` by hand, then
+`build-sync-analyzer --refresh-facts` reads them. Entries are never pruned
+automatically; remove old rows and files manually if disk space becomes a
 concern. A hard crash mid-upload can also leave stale `.upload-*.tmp` files
 under the sync-results folder; they are safe to delete. A hard crash can also
-leave a `<version>.zip.prev` file: this endpoint moves an existing zip aside
-to that name before replacing it, and only deletes it once the replacement is
+leave an `<id>.zip.prev` file: this endpoint moves an existing zip aside to
+that name before replacing it, and only deletes it once the replacement is
 confirmed stored, so a crash at exactly that point can leave it behind. Check
-that `<version>.zip` itself is present and correct before deleting the
-`.prev` file - if `<version>.zip` is missing or corrupt, `.prev` is the last
-good copy.
+that `<id>.zip` itself is present and correct before deleting the `.prev`
+file - if `<id>.zip` is missing or corrupt, `.prev` is the last good copy.
 
-Upload the results zip for a version:
+Upload the results zip of a run:
 
 ```sh
-curl -X PUT --fail-with-body -u username:password http://localhost:5000/sync-results/11.1.0 -F "syncresults=@/home/user/path/to/sync_results.zip"
+curl -X PUT --fail-with-body -u username:password http://localhost:5000/sync-results/11.1.0 \
+  -F "syncresults=@/home/user/path/to/sync_results.zip" \
+  -F "environment=mainnet" -F "started=2026-08-19T18:11:28+00:00"
 ```
 
-List every version that currently has a stored entry:
+List every run that currently has a stored entry, newest start first:
 
 ```sh
 curl -u username:password http://localhost:5000/sync-results
 ```
 
-Download the stored zip for a version:
+Download the stored zip of run 3:
 
 ```sh
-curl -u username:password http://localhost:5000/sync-results/11.1.0/zip
+curl -u username:password http://localhost:5000/sync-results/3/zip
 ```
 
 ## Per-run test statistics
@@ -395,6 +405,69 @@ so the run shows in the charts and not only in the all-time totals, or from a
 `cardano-node-tests` checkout with `ENABLE_TCACHE_STATS=true`,
 `TCACHE_BASIC_AUTH=ci:<password>` and `TCACHE_URL=http://127.0.0.1:5000/results`
 set.
+
+## Sync analyzer
+
+A public page lets a visitor pick one to four stored sync runs, see their
+graphs on one set of axes with a table of numbers, and download each run's
+zip. Like the dashboard, the page lives in the `cardano-node-tests` repository
+(`src_docs/source/extra/sync-analyzer/`) and this service publishes only its
+data. Three things are public:
+
+- `sync_analyzer.json` in `DASHBOARD_FOLDER`: every stored run with the
+  numbers read from its `node_sync_results.json`. Rewritten after each
+  sync-results upload, like `dashboard.json`.
+- `GET /sync-analyzer/graphs/<ids>/<graph>.png`: a graph of the runs named by
+  `<ids>`, their row ids in ascending order joined by `-`, at most four.
+  `<graph>` is one of the files `sync_static_graphs.py` writes, such as
+  `nodesync_progress`. The first request for a pick runs the script and keeps
+  its output under `SYNC_GRAPHS_FOLDER`; a new upload of a run discards every
+  pick that holds it.
+- `GET /sync-analyzer/runs/<id>/zip`: the stored zip of a run, without login.
+
+The graphs are drawn by `sync_static_graphs.py` from `cardano-sync-tests`,
+the script behind the published sync reports, so this service needs a
+checkout of that repository with its dependencies installed. Install it next
+to this service and name how to run the script in `$INSTANCE_PATH/config.py`:
+
+```python
+SYNC_GRAPHS_COMMAND = [
+    "/home/tcache/cardano-sync-tests/.venv/bin/python",
+    "/home/tcache/cardano-sync-tests/sync_tests/scripts/sync_static_graphs.py",
+]
+```
+
+Until it is set, the graph route answers 503 and the rest of the analyzer
+works. `SYNC_GRAPHS_FOLDER` (default `$INSTANCE_PATH/sync_graphs`) holds the
+rendered picks and is safe to empty at any time. `SYNC_GRAPHS_TIMEOUT`
+(default 300 seconds) bounds one run of the script.
+
+Forward the routes from the dashboard site, so they share the page's
+allowed origin:
+
+```caddyfile
+dashboard.example.org {
+    root * /srv/tcache-dashboard
+    encode gzip
+    header {
+        Access-Control-Allow-Origin https://tests.cardano.intersectmbo.org
+        X-Content-Type-Options nosniff
+        Referrer-Policy no-referrer
+    }
+    reverse_proxy /sync-analyzer/* 127.0.0.1:8000
+    file_server {
+        hide .*
+    }
+}
+```
+
+Rebuild the run list by hand, for example after renaming zips from before
+migration 004, with `--refresh-facts` to read every zip again. Reading a zip
+again also discards the rendered picks that hold its run:
+
+```sh
+flask --app testing_results_cache.app:create_app build-sync-analyzer --refresh-facts
+```
 
 ## Run tests
 

@@ -11,6 +11,7 @@ from testing_results_cache import flask_db
 from testing_results_cache import history_api
 from testing_results_cache import results_api
 from testing_results_cache import stats_api
+from testing_results_cache import sync_analyzer
 from testing_results_cache import sync_results_api
 
 INSTANCE_PATH = Path(__file__).parent.parent / "instance_dev"
@@ -45,6 +46,12 @@ def create_app() -> flask.Flask:
         UPLOAD_FOLDER=str(instance_path / "uploads"),
         HISTORY_FOLDER=str(instance_path / "history"),
         SYNC_RESULTS_FOLDER=str(instance_path / "sync_results"),
+        # How to run sync_static_graphs.py from cardano-sync-tests, as a list,
+        # e.g. the python of its virtual environment and the script path. The
+        # analyzer's graphs are off until this is set in the instance config.
+        SYNC_GRAPHS_COMMAND=None,
+        SYNC_GRAPHS_FOLDER=str(instance_path / "sync_graphs"),
+        SYNC_GRAPHS_TIMEOUT=300,
         # The public dashboard is off until this is set in the instance config.
         DASHBOARD_FOLDER=None,
         # Issues found by our testing: the GitHub logins whose upstream issues count.
@@ -71,11 +78,13 @@ def create_app() -> flask.Flask:
     app.cli.add_command(flask_db.prune_history_command)
     app.cli.add_command(dashboard.build_dashboard_command)
     app.cli.add_command(dashboard.update_impact_command)
+    app.cli.add_command(sync_analyzer.build_sync_analyzer_command)
 
     app.register_blueprint(results_api.results)
     app.register_blueprint(history_api.history)
     app.register_blueprint(sync_results_api.sync_results)
     app.register_blueprint(stats_api.stats)
+    app.register_blueprint(sync_analyzer.analyzer)
 
     @app.errorhandler(413)
     def _request_entity_too_large(_exc: Exception) -> flask.Response:

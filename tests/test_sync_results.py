@@ -1,8 +1,9 @@
 """Tests for the sync-results cache endpoints (/sync-results/...).
 
-Deliberately separate from /history: this endpoint keeps at most one entry
-per cardano-node version, and a new upload for a version replaces whatever
-was stored before, instead of being rejected as a duplicate.
+Deliberately separate from /history: this endpoint keeps one entry per sync
+run (network, cardano-node version and start time), and a new upload for
+the same run replaces whatever was stored before, instead of being rejected
+as a duplicate.
 """
 
 import http
@@ -30,7 +31,6 @@ from werkzeug.test import TestResponse  # type: ignore[attr-defined]
 
 from testing_results_cache import flask_db
 from testing_results_cache import sync_results_api
-from testing_results_cache import sync_results_cache
 
 
 def _make_zip(*, node_sync_results: bytes = b'{"tag_no1": "11.1.0"}') -> bytes:
@@ -98,19 +98,42 @@ def _password_protected_zip(tmp_path: Path) -> bytes:
     return encrypted.read_bytes()
 
 
+STARTED = "2026-10-28T12:38:51+00:00"
+LATER = "2026-11-03T08:00:00+00:00"
+
+
 def _upload(
     client: flask.testing.FlaskClient,
     headers: dict,
     version: str,
     content: bytes = SAMPLE_ZIP,
     filename: str = "sync_results.zip",
+    environment: str = "mainnet",
+    started: str = STARTED,
 ) -> TestResponse:
     return client.put(
         f"/sync-results/{version}",
         headers=headers,
-        data={"syncresults": (io.BytesIO(content), filename)},
+        data={
+            "syncresults": (io.BytesIO(content), filename),
+            "environment": environment,
+            "started": started,
+        },
         content_type="multipart/form-data",
     )
+
+
+def _run_id(client: flask.testing.FlaskClient, headers: dict, version: str) -> int:
+    """Return the id the listing gives the one stored run of a version."""
+    entries = client.get("/sync-results", headers=headers).get_json()
+    ids: List[int] = [e["id"] for e in entries if e["version"] == version]
+    assert len(ids) == 1, ids
+    return ids[0]
+
+
+def _download(client: flask.testing.FlaskClient, headers: dict, version: str) -> TestResponse:
+    """Fetch the stored zip of the one run of a version."""
+    return client.get(f"/sync-results/{_run_id(client, headers, version)}/zip", headers=headers)
 
 
 def _tmp_files(app: flask.Flask) -> List[Path]:
@@ -123,12 +146,19 @@ class TestUploadAndDownload:
     ) -> None:
         resp = _upload(client, auth_headers, "11.1.0")
         assert resp.status_code == http.HTTPStatus.OK
-        assert resp.get_json() == {"sync_results": "11.1.0"}
+        assert resp.get_json() == {
+            "sync_results": "11.1.0",
+            "id": 1,
+            "environment": "mainnet",
+            "started": STARTED,
+        }
 
         list_resp = client.get("/sync-results", headers=auth_headers)
         assert list_resp.status_code == http.HTTPStatus.OK
         entries = list_resp.get_json()
-        assert [e["version"] for e in entries] == ["11.1.0"]
+        assert [(e["id"], e["environment"], e["version"], e["started"]) for e in entries] == [
+            (1, "mainnet", "11.1.0", STARTED)
+        ]
 
         # The timestamp must survive the store-and-parse round trip as
         # tz-aware UTC and be plausibly "now" - see the sync_results.timestamp
@@ -137,7 +167,7 @@ class TestUploadAndDownload:
         assert timestamp.utcoffset() == timedelta(0)
         assert abs(datetime.now(UTC) - timestamp) < timedelta(minutes=1)
 
-        with client.get("/sync-results/11.1.0/zip", headers=auth_headers) as zip_resp:
+        with _download(client, auth_headers, "11.1.0") as zip_resp:
             assert zip_resp.status_code == http.HTTPStatus.OK
             assert zip_resp.mimetype == "application/zip"
             assert zip_resp.data == SAMPLE_ZIP
@@ -159,7 +189,7 @@ class TestUploadAndDownload:
         second = _upload(client, auth_headers, "11.1.0", content=OTHER_ZIP)
         assert second.status_code == http.HTTPStatus.OK
 
-        with client.get("/sync-results/11.1.0/zip", headers=auth_headers) as zip_resp:
+        with _download(client, auth_headers, "11.1.0") as zip_resp:
             assert zip_resp.data == OTHER_ZIP
 
         # Still exactly one entry for this version, not two.
@@ -171,29 +201,22 @@ class TestUploadAndDownload:
         resp = client.post(
             "/sync-results/11.1.0",
             headers=auth_headers,
-            data={"syncresults": (io.BytesIO(SAMPLE_ZIP), "sync_results.zip")},
+            data={
+                "syncresults": (io.BytesIO(SAMPLE_ZIP), "sync_results.zip"),
+                "environment": "mainnet",
+                "started": STARTED,
+            },
             content_type="multipart/form-data",
         )
         assert resp.status_code == http.HTTPStatus.OK
 
-    def test_excludes_different_version(
-        self, client: flask.testing.FlaskClient, auth_headers: dict
-    ) -> None:
-        _upload(client, auth_headers, "11.0.1")
-
-        resp = client.get("/sync-results/11.1.0/zip", headers=auth_headers)
-        assert resp.status_code == http.HTTPStatus.NOT_FOUND
-
-        entries = client.get("/sync-results", headers=auth_headers).get_json()
-        assert [e["version"] for e in entries] == ["11.0.1"]
-
     def test_requires_auth(self, client: flask.testing.FlaskClient) -> None:
         assert client.get("/sync-results").status_code == http.HTTPStatus.UNAUTHORIZED
-        assert client.get("/sync-results/11.1.0/zip").status_code == http.HTTPStatus.UNAUTHORIZED
+        assert client.get("/sync-results/1/zip").status_code == http.HTTPStatus.UNAUTHORIZED
         assert client.put("/sync-results/11.1.0").status_code == http.HTTPStatus.UNAUTHORIZED
 
     def test_not_found(self, client: flask.testing.FlaskClient, auth_headers: dict) -> None:
-        resp = client.get("/sync-results/no-such-version/zip", headers=auth_headers)
+        resp = client.get("/sync-results/999/zip", headers=auth_headers)
         assert resp.status_code == http.HTTPStatus.NOT_FOUND
 
     def test_missing_file_is_404(
@@ -201,9 +224,9 @@ class TestUploadAndDownload:
     ) -> None:
         """DB row exists but the file was deleted from disk."""
         _upload(client, auth_headers, "11.1.0")
-        Path(app.config["SYNC_RESULTS_FOLDER"], "11.1.0.zip").unlink()
+        Path(app.config["SYNC_RESULTS_FOLDER"], "1.zip").unlink()
 
-        resp = client.get("/sync-results/11.1.0/zip", headers=auth_headers)
+        resp = _download(client, auth_headers, "11.1.0")
         assert resp.status_code == http.HTTPStatus.NOT_FOUND
 
     def test_missing_table_is_json_500_not_html(
@@ -226,7 +249,7 @@ class TestUploadAndDownload:
         assert list_resp.content_type == "application/json"
         assert list_resp.get_json()["message"] == "Failed to read sync results"
 
-        zip_resp = client.get("/sync-results/11.1.0/zip", headers=auth_headers)
+        zip_resp = client.get("/sync-results/1/zip", headers=auth_headers)
         assert zip_resp.status_code == http.HTTPStatus.INTERNAL_SERVER_ERROR
         assert zip_resp.content_type == "application/json"
         assert zip_resp.get_json()["message"] == "Failed to read sync results"
@@ -254,7 +277,7 @@ class TestUploadAndDownload:
         assert bad.status_code == http.HTTPStatus.BAD_REQUEST
         assert bad.get_json()["message"] == "Unexpected file type"
 
-        with client.get("/sync-results/11.1.0/zip", headers=auth_headers) as zip_resp:
+        with _download(client, auth_headers, "11.1.0") as zip_resp:
             assert zip_resp.data == SAMPLE_ZIP
 
     def test_rejects_empty_filename(
@@ -316,7 +339,7 @@ class TestUploadAndDownload:
         bad = _upload(client, auth_headers, "11.1.0", content=CORRUPT_ZIP)
         assert bad.status_code == http.HTTPStatus.BAD_REQUEST
 
-        with client.get("/sync-results/11.1.0/zip", headers=auth_headers) as zip_resp:
+        with _download(client, auth_headers, "11.1.0") as zip_resp:
             assert zip_resp.data == SAMPLE_ZIP
 
     def test_bad_content_does_not_overwrite_existing_upload(
@@ -328,7 +351,7 @@ class TestUploadAndDownload:
         bad = _upload(client, auth_headers, "11.1.0", content=b"garbage")
         assert bad.status_code == http.HTTPStatus.BAD_REQUEST
 
-        with client.get("/sync-results/11.1.0/zip", headers=auth_headers) as zip_resp:
+        with _download(client, auth_headers, "11.1.0") as zip_resp:
             assert zip_resp.data == SAMPLE_ZIP
 
     def test_rejects_password_protected_zip(
@@ -407,14 +430,6 @@ class TestUploadAndDownload:
         assert resp.get_json()["message"] == "Not a valid zip file"
         assert _tmp_files(app) == []
 
-    def test_rejects_traversal_version_on_download(
-        self, client: flask.testing.FlaskClient, auth_headers: dict
-    ) -> None:
-        _upload(client, auth_headers, "11.1.0")
-
-        resp = client.get("/sync-results/%2e%2e/zip", headers=auth_headers)
-        assert resp.status_code == http.HTTPStatus.BAD_REQUEST
-
     def test_rejects_traversal_version_on_upload(
         self, client: flask.testing.FlaskClient, auth_headers: dict
     ) -> None:
@@ -434,9 +449,6 @@ class TestUploadAndDownload:
         resp = _upload(client, auth_headers, "11.1.0%0A")
         assert resp.status_code == http.HTTPStatus.BAD_REQUEST
 
-        resp = client.get("/sync-results/11.1.0%0A/zip", headers=auth_headers)
-        assert resp.status_code == http.HTTPStatus.BAD_REQUEST
-
     def test_accepts_dots_in_version(
         self, client: flask.testing.FlaskClient, auth_headers: dict
     ) -> None:
@@ -445,41 +457,71 @@ class TestUploadAndDownload:
         assert resp.status_code == http.HTTPStatus.OK
 
 
-def _set_timestamp(db_path: str, version: str, when: datetime) -> None:
-    conn = sqlite3.connect(db_path)
-    conn.execute(
-        "UPDATE sync_results SET timestamp = ? WHERE version = ?",
-        (when.strftime(sync_results_cache.TIMESTAMP_FORMAT), version),
+class TestRunKey:
+    """The run is the version plus the environment and start time fields."""
+
+    def test_the_same_version_on_two_networks_is_two_runs(
+        self, client: flask.testing.FlaskClient, auth_headers: dict
+    ) -> None:
+        _upload(client, auth_headers, "11.1.0")
+        _upload(client, auth_headers, "11.1.0", content=OTHER_ZIP, environment="preview")
+
+        entries = client.get("/sync-results", headers=auth_headers).get_json()
+        assert [(e["id"], e["environment"]) for e in entries] == [(2, "preview"), (1, "mainnet")]
+        with client.get("/sync-results/2/zip", headers=auth_headers) as zip_resp:
+            assert zip_resp.data == OTHER_ZIP
+
+    def test_a_rerun_of_a_version_is_a_second_run(
+        self, client: flask.testing.FlaskClient, auth_headers: dict
+    ) -> None:
+        _upload(client, auth_headers, "11.1.0")
+        _upload(client, auth_headers, "11.1.0", content=OTHER_ZIP, started=LATER)
+
+        entries = client.get("/sync-results", headers=auth_headers).get_json()
+        assert [(e["id"], e["started"]) for e in entries] == [(2, LATER), (1, STARTED)]
+
+    def test_a_start_time_in_another_zone_is_stored_as_utc(
+        self, client: flask.testing.FlaskClient, auth_headers: dict
+    ) -> None:
+        resp = _upload(client, auth_headers, "11.1.0", started="2026-10-28T14:38:51+02:00")
+        assert resp.status_code == http.HTTPStatus.OK
+        entries = client.get("/sync-results", headers=auth_headers).get_json()
+        assert entries[0]["started"] == STARTED
+
+    @pytest.mark.parametrize(
+        ("started", "message"),
+        [
+            ("", "Missing or invalid 'started': expected an ISO 8601 time"),
+            ("yesterday", "Missing or invalid 'started': expected an ISO 8601 time"),
+            ("2026-10-28T12:38:51", "Invalid 'started': the time needs a UTC offset"),
+        ],
     )
-    conn.commit()
-    conn.close()
+    def test_rejects_a_bad_start_time(
+        self, client: flask.testing.FlaskClient, auth_headers: dict, started: str, message: str
+    ) -> None:
+        resp = _upload(client, auth_headers, "11.1.0", started=started)
+        assert resp.status_code == http.HTTPStatus.BAD_REQUEST
+        assert resp.get_json()["message"] == message
+        assert client.get("/sync-results", headers=auth_headers).get_json() == []
+
+    def test_rejects_a_missing_environment(
+        self, client: flask.testing.FlaskClient, auth_headers: dict
+    ) -> None:
+        resp = _upload(client, auth_headers, "11.1.0", environment="")
+        assert resp.status_code == http.HTTPStatus.BAD_REQUEST
+        assert resp.get_json()["message"] == "Missing or invalid 'environment'"
 
 
 class TestListOrdering:
-    def test_orders_newest_first(
-        self, app: flask.Flask, client: flask.testing.FlaskClient, auth_headers: dict
+    def test_orders_newest_start_first(
+        self, client: flask.testing.FlaskClient, auth_headers: dict
     ) -> None:
+        _upload(client, auth_headers, "11.1.0", started=LATER)
         _upload(client, auth_headers, "11.0.1")
-        _upload(client, auth_headers, "11.1.0")
-        _set_timestamp(app.config["DATABASE"], "11.0.1", datetime.now(UTC) - timedelta(days=2))
 
         resp = client.get("/sync-results", headers=auth_headers)
         versions = [entry["version"] for entry in resp.get_json()]
         assert versions == ["11.1.0", "11.0.1"]
-
-    def test_replacing_a_version_updates_its_position(
-        self, app: flask.Flask, client: flask.testing.FlaskClient, auth_headers: dict
-    ) -> None:
-        _upload(client, auth_headers, "11.0.1")
-        _upload(client, auth_headers, "11.1.0")
-        _set_timestamp(app.config["DATABASE"], "11.0.1", datetime.now(UTC) - timedelta(days=2))
-
-        # Re-upload the older version - it should now sort as the newest.
-        _upload(client, auth_headers, "11.0.1", content=OTHER_ZIP)
-
-        resp = client.get("/sync-results", headers=auth_headers)
-        versions = [entry["version"] for entry in resp.get_json()]
-        assert versions == ["11.0.1", "11.1.0"]
 
     def test_a_malformed_timestamp_is_skipped_not_fatal(
         self, app: flask.Flask, client: flask.testing.FlaskClient, auth_headers: dict
@@ -558,7 +600,7 @@ class TestLockContention:
         assert resp.status_code == http.HTTPStatus.SERVICE_UNAVAILABLE
         assert resp.headers.get("Retry-After") == "5"
 
-        with client.get("/sync-results/11.1.0/zip", headers=auth_headers) as zip_resp:
+        with _download(client, auth_headers, "11.1.0") as zip_resp:
             assert zip_resp.data == SAMPLE_ZIP
 
     @pytest.mark.parametrize(
@@ -621,7 +663,7 @@ class TestLockContention:
         assert resp.status_code == expected
 
         # Whatever the verdict, the good zip it was replacing is still served.
-        with client.get("/sync-results/11.1.0/zip", headers=auth_headers) as zip_resp:
+        with _download(client, auth_headers, "11.1.0") as zip_resp:
             assert zip_resp.data == SAMPLE_ZIP
 
     def test_a_non_lock_database_error_is_still_a_500(
@@ -662,7 +704,7 @@ class TestLockContention:
         assert "Retry-After" not in resp.headers
 
         # And the good zip it was replacing is still the one served.
-        with client.get("/sync-results/11.1.0/zip", headers=auth_headers) as zip_resp:
+        with _download(client, auth_headers, "11.1.0") as zip_resp:
             assert zip_resp.data == SAMPLE_ZIP
 
     def test_survives_a_commit_failure_after_the_rename_has_landed(
@@ -692,7 +734,7 @@ class TestLockContention:
 
         assert resp.status_code == http.HTTPStatus.SERVICE_UNAVAILABLE
 
-        with client.get("/sync-results/11.1.0/zip", headers=auth_headers) as zip_resp:
+        with _download(client, auth_headers, "11.1.0") as zip_resp:
             assert zip_resp.data == SAMPLE_ZIP
 
         # No backup file left lying around either.
