@@ -1,11 +1,12 @@
 """Endpoints for storing and retrieving the cached sync-test-results zip.
 
 Deliberately separate from /history: /history keeps one entry per
-testrun+job forever, appending. This endpoint keeps at most one entry per
-cardano-node version, and a new upload for a version replaces whatever was
-stored for it before. No parsing of the zip's contents happens here - the
-caller (cardano-sync-tests CI) decides what goes inside, this service only
-stores and hands it back.
+testrun+job forever, appending. This endpoint keeps one entry per sync run
+(network, cardano-node version and start time), and a new upload for the
+same run replaces whatever was stored for it before. No parsing of the
+zip's contents happens here - the caller (cardano-sync-tests CI) decides
+what goes inside, this service stores it and hands it back. The sync
+analyzer reads the stored zip afterwards, in sync_analyzer.py.
 
 Mounted at `/sync-results/...`, its own top-level prefix, so a version
 string can never collide with a route under `/results/` or `/history/`.
@@ -16,6 +17,7 @@ import sqlite3
 import tempfile
 import zipfile
 import zlib
+from datetime import datetime
 from pathlib import Path
 from typing import List
 from typing import NoReturn
@@ -26,6 +28,7 @@ from werkzeug.exceptions import HTTPException
 from testing_results_cache import common
 from testing_results_cache import flask_auth
 from testing_results_cache import flask_db
+from testing_results_cache import sync_analyzer
 from testing_results_cache import sync_results_cache
 
 # A real sync-results bundle (JSON metrics plus a handful of PNGs) is a few
@@ -86,9 +89,29 @@ def _valid_zip(path: Path) -> bool:
         return False
 
 
-def _sync_results_file(version: str) -> Path:
-    folder = Path(flask.current_app.config["SYNC_RESULTS_FOLDER"])
-    return folder / f"{version}.zip"
+def _started() -> datetime:
+    """Read the run's start time from the upload form.
+
+    The analyzer orders runs by it and the row key includes it, so a
+    naive time is refused: two uploaders in different zones would make two
+    runs out of one.
+    """
+    raw = flask.request.form.get("started", "")
+    try:
+        started = datetime.fromisoformat(raw)
+    except ValueError:
+        common.abort_json(400, "Missing or invalid 'started': expected an ISO 8601 time")
+    if started.tzinfo is None:
+        common.abort_json(400, "Invalid 'started': the time needs a UTC offset")
+    return started
+
+
+def _environment() -> str:
+    """Read the network name from the upload form."""
+    environment = flask.request.form.get("environment", "")
+    if not common.valid_path_segment(environment):
+        common.abort_json(400, "Missing or invalid 'environment'")
+    return environment
 
 
 def _rollback(conn: sqlite3.Connection, version: str) -> None:
@@ -200,7 +223,10 @@ def _reject_invalid_zip_content(version: str, path: Path) -> None:
 @sync_results.route("/sync-results/<version>", methods=["PUT", "POST"])
 @flask_auth.auth.login_required
 def upload_sync_results(version: str) -> dict:
-    """Store the sync-results zip for a version, replacing any prior upload."""
+    """Store the sync-results zip for one run, replacing any prior upload of it.
+
+    The run is `version` plus the `environment` and `started` form fields.
+    """
     common.reject_invalid_segments(version)
 
     if "syncresults" not in flask.request.files:
@@ -213,24 +239,28 @@ def upload_sync_results(version: str) -> dict:
         or Path(file.filename).suffix.lower() not in common.ALLOWED_SYNC_RESULTS_EXTENSIONS
     ):
         common.abort_json(400, "Unexpected file type")
+    environment = _environment()
+    started = _started()
 
     conn = flask_db.get_db()
     user_id = flask_auth.auth.current_user()["user_id"]
-    filepath = _sync_results_file(version=version)
+    folder = Path(flask.current_app.config["SYNC_RESULTS_FOLDER"])
 
     # mkstemp, not a random-suffix name: its O_EXCL creation guarantees each
     # request its own file instead of silently colliding with a concurrent
     # upload for a different version (preforked WSGI workers can share PRNG
     # state, so "random" suffixes do collide in practice).
     try:
-        filepath.parent.mkdir(parents=True, exist_ok=True)
-        tmp_fd, tmp_name = tempfile.mkstemp(dir=filepath.parent, prefix=".upload-", suffix=".tmp")
+        folder.mkdir(parents=True, exist_ok=True)
+        tmp_fd, tmp_name = tempfile.mkstemp(dir=folder, prefix=".upload-", suffix=".tmp")
         os.close(tmp_fd)
     except OSError:
         flask.current_app.logger.exception(f"Sync-results storage unavailable for {version}")
         common.abort_json(500, "Failed to store sync results")
     tmp_filepath = Path(tmp_name)
-    prev_filepath = filepath.with_name(filepath.name + ".prev")
+    # Set once the row exists: the row id names the file.
+    filepath = tmp_filepath
+    prev_filepath = tmp_filepath
 
     # There is no reject-as-duplicate fallback here like /history has - a
     # bad upload would overwrite and destroy the last good one for this
@@ -258,7 +288,15 @@ def upload_sync_results(version: str) -> dict:
         _fsync_path(tmp_filepath)
         _reject_invalid_zip_content(version, tmp_filepath)
 
-        sync_results_cache.save_sync_results_entry(conn=conn, version=version, user_id=user_id)
+        run_id = sync_results_cache.save_sync_results_entry(
+            conn=conn,
+            environment=environment,
+            version=version,
+            started=started,
+            user_id=user_id,
+        )
+        filepath = sync_analyzer.results_file(run_id)
+        prev_filepath = filepath.with_name(filepath.name + ".prev")
 
         # From here on, filepath itself may be mutated - `entered_disk_phase`
         # marks that, so a failure after this point can be undone.
@@ -321,48 +359,41 @@ def upload_sync_results(version: str) -> dict:
                 f"Could not remove temp upload file {tmp_filepath} for {version}", exc_info=True
             )
 
-    return {"sync_results": version}
+    sync_analyzer.after_upload(conn, run_id)
+
+    return {
+        "sync_results": version,
+        "id": run_id,
+        "environment": environment,
+        "started": started.isoformat(),
+    }
+
+
+def entry_dict(entry: common.SyncResultsEntry) -> dict:
+    """Return the fields of a stored run that a caller sees."""
+    return {
+        "id": entry.id,
+        "environment": entry.environment,
+        "version": entry.version,
+        "started": entry.started.isoformat(),
+        "timestamp": entry.timestamp.isoformat(),
+    }
 
 
 @sync_results.route("/sync-results", methods=["GET"])
 @flask_auth.auth.login_required
 def list_sync_results() -> List[dict]:
-    """List every version that currently has a stored sync-results zip."""
+    """List every run that currently has a stored sync-results zip."""
     conn = flask_db.get_db()
     try:
         entries = sync_results_cache.list_sync_results(conn=conn)
     except sqlite3.Error:
         _abort_read_failure("listing")
-    return [{"version": e.version, "timestamp": e.timestamp.isoformat()} for e in entries]
+    return [entry_dict(e) for e in entries]
 
 
-@sync_results.route("/sync-results/<version>/zip", methods=["GET"])
+@sync_results.route("/sync-results/<int:run_id>/zip", methods=["GET"])
 @flask_auth.auth.login_required
-def get_sync_results_zip(version: str) -> flask.Response:
-    """Download the stored sync-results zip for a version."""
-    common.reject_invalid_segments(version)
-
-    conn = flask_db.get_db()
-    try:
-        exists = sync_results_cache.sync_results_exists(conn=conn, version=version)
-    except sqlite3.Error:
-        _abort_read_failure(version)
-    if not exists:
-        common.abort_json(404, "No sync results found for this version")
-
-    filepath = _sync_results_file(version=version)
-    if not filepath.is_file():
-        # DB says yes, disk says no - usually server-side data loss, not a
-        # client error, so log it loudly; the 404 alone would hide the
-        # distinction from the operator. There is one narrow, self-healing
-        # exception: an overwrite in upload_sync_results moves the old file
-        # to <name>.prev, then renames the new one into place - a request
-        # landing in that microsecond gap sees a real but transient miss,
-        # not data loss. Check for a matching .prev file before treating
-        # this log line as an incident.
-        flask.current_app.logger.error(
-            f"Sync-results DB row exists for {version} but file {filepath} is missing"
-        )
-        common.abort_json(404, "No sync results found for this version")
-
-    return flask.send_file(filepath, mimetype="application/zip")
+def get_sync_results_zip(run_id: int) -> flask.Response:
+    """Download the stored sync-results zip of a run."""
+    return sync_analyzer.send_zip(run_id)
