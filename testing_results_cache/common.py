@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import List
 from typing import NamedTuple
 from typing import NoReturn
+from typing import Optional
 
 import flask
 
@@ -125,16 +126,29 @@ class HistoryEntry(NamedTuple):
 
 
 class SyncResultsEntry(NamedTuple):
-    """Record that a sync-results zip exists for a node version, and when it landed.
+    """Record that a sync-results zip exists for one sync run, and when it landed.
 
-    Unlike HistoryEntry, there is only ever one row per version: a new
-    upload replaces the old one instead of being rejected as a duplicate.
-    `timestamp` is always tz-aware UTC, attached by
-    `sync_results_cache._parse_timestamp` when rows are read back.
+    A run is one network, one node version and one start time. Unlike
+    HistoryEntry, a new upload for the same run replaces the old one instead
+    of being rejected as a duplicate. `started` and `timestamp` are always
+    tz-aware UTC, attached by `sync_results_cache._parse_timestamp` when rows
+    are read back.
+
+    Attributes:
+        id: The row id, which names the zip on disk.
+        environment: The network the node synced, such as `mainnet`.
+        version: The cardano-node version or commit under test.
+        started: When the sync started, as the uploader reported it.
+        timestamp: When the zip was uploaded.
+        facts: The numbers the sync analyzer shows, or None.
     """
 
+    id: int
+    environment: str
     version: str
+    started: datetime
     timestamp: datetime
+    facts: Optional[dict] = None
 
 
 class TestrunStatsEntry(NamedTuple):
