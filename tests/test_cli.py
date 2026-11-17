@@ -25,8 +25,8 @@ from testing_results_cache import migrations_runner
 from testing_results_cache import retention
 
 DAYS_KEPT = 30
-# The three migrations this repo ships.
-SHIPPED_MIGRATIONS = 3
+# The four migrations this repo ships.
+SHIPPED_MIGRATIONS = 4
 
 
 def _run(app: flask.Flask, command: click.Command, *args: str) -> Result:
