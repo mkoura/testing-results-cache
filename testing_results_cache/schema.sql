@@ -3,6 +3,7 @@ DROP TABLE IF EXISTS testrun;
 DROP TABLE IF EXISTS results;
 DROP TABLE IF EXISTS history;
 DROP TABLE IF EXISTS sync_results;
+DROP TABLE IF EXISTS testrun_stats;
 
 CREATE TABLE users (
     id INTEGER PRIMARY KEY,
@@ -42,17 +43,48 @@ CREATE TABLE history (
     UNIQUE (testrun_name, job_id)
 );
 
--- Cached sync-test-results zips (JSON metrics + rendered graphs), keyed by
--- cardano-node version only. Unlike history, this upserts: a new upload
--- for a version replaces whatever was stored for it before, so there is
--- only ever one row per version.
+-- Cached sync-test-results zips, one row per sync run. A run is identified
+-- by network, cardano-node version and start time together. Unlike history,
+-- this upserts: a new upload for the same run replaces whatever was stored
+-- for it before. Kept in step with migrations/004_sync_runs.sql.
 CREATE TABLE sync_results (
-    version TEXT PRIMARY KEY,
+    id INTEGER PRIMARY KEY,
+    environment TEXT NOT NULL,
+    version TEXT NOT NULL,
+    -- When the sync started, as the uploader reports it. Deliberately TEXT,
+    -- not TIMESTAMP: see the comment on history.timestamp above. Same
+    -- reasoning, same format, formatted/parsed by sync_results_cache.py.
+    started TEXT NOT NULL,
     user_id INTEGER,
-    -- Deliberately TEXT, not TIMESTAMP: see the comment on history.timestamp
-    -- above. Same reasoning, same format, formatted/parsed by
-    -- sync_results_cache.py itself.
-    timestamp TEXT NOT NULL
+    timestamp TEXT NOT NULL,
+    -- The numbers the sync analyzer shows, read from the zip at upload.
+    -- NULL when the zip holds no readable node results file.
+    facts TEXT,
+    UNIQUE (environment, version, started)
+);
+
+-- Kept in step with migrations/003_testrun_stats.sql, which comments each column.
+CREATE TABLE testrun_stats (
+    id INTEGER PRIMARY KEY,
+    project TEXT NOT NULL,
+    testrun_name TEXT NOT NULL,
+    run_id TEXT NOT NULL,
+    step TEXT NOT NULL,
+    origin TEXT NOT NULL,
+    user_id INTEGER,
+    -- TEXT, not TIMESTAMP: see the comment on history.timestamp above.
+    timestamp TEXT NOT NULL,
+    cases INTEGER NOT NULL,
+    passed INTEGER NOT NULL,
+    failed INTEGER NOT NULL,
+    broken INTEGER NOT NULL,
+    skipped INTEGER NOT NULL,
+    never_run INTEGER NOT NULL,
+    duration REAL NOT NULL,
+    exit_code INTEGER NOT NULL,
+    filtered INTEGER NOT NULL,
+    payload TEXT NOT NULL,
+    UNIQUE (project, testrun_name, run_id, step, origin)
 );
 
 -- Kept in step with migrations/002_indexes.sql, so a database created from
@@ -61,3 +93,11 @@ CREATE TABLE sync_results (
 CREATE INDEX idx_results_testrun_user ON results(testrun_id, user_id);
 CREATE INDEX idx_testrun_name ON testrun(name);
 CREATE INDEX idx_users_name ON users(name);
+
+-- Kept in step with migrations/004_sync_runs.sql.
+CREATE INDEX idx_sync_results_started ON sync_results(started);
+
+-- Kept in step with migrations/003_testrun_stats.sql.
+CREATE INDEX idx_testrun_stats_ts ON testrun_stats(timestamp);
+CREATE INDEX idx_testrun_stats_proj_ts ON testrun_stats(project, timestamp);
+CREATE INDEX idx_testrun_stats_name_ts ON testrun_stats(testrun_name, timestamp);

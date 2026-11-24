@@ -7,6 +7,7 @@ code.
 """
 
 import re
+import shutil
 import sqlite3
 from pathlib import Path
 
@@ -14,7 +15,8 @@ import pytest
 
 from testing_results_cache import migrations_runner
 
-# The two migrations this repo ships.
+# The two migrations the `migrations` fixture below creates - not the count
+# this repo ships (see tests/test_cli.py for that one).
 SHIPPED_MIGRATIONS = 2
 SEVENTH = 7
 
@@ -133,6 +135,15 @@ class TestRefusesToGuess:
             migrations_runner.available(folder)
 
 
+def _shipped_up_to(folder: Path, version: int) -> Path:
+    """Fill `folder` with the shipped migrations up to and including `version`."""
+    folder.mkdir()
+    for migration in migrations_runner.available():
+        if migration.version <= version:
+            shutil.copy(migration.path, folder / migration.path.name)
+    return folder
+
+
 class TestTheRealMigrations:
     """The shipped migrations, against the deployment they will actually meet."""
 
@@ -162,6 +173,34 @@ class TestTheRealMigrations:
         assert conn.execute("SELECT test_name, verdict FROM results").fetchall() == before
         assert conn.execute("SELECT name FROM testrun").fetchall() == [("legacy",)]
         assert {"history", "sync_results"} <= _tables(conn)
+
+    def test_a_version_keyed_sync_result_becomes_a_mainnet_run(
+        self, conn: sqlite3.Connection, tmp_path: Path
+    ) -> None:
+        """Rows from before 004 carry over, keyed on the network and the upload time."""
+        migrations_runner.apply(conn=conn, migrations_dir=_shipped_up_to(tmp_path / "m", 3))
+        conn.execute(
+            "INSERT INTO sync_results(version, user_id, timestamp)"
+            " VALUES ('11.1.0', 1, '2026-08-21 02:37:02.000000')"
+        )
+        conn.commit()
+
+        migrations_runner.apply(conn=conn)
+
+        rows = conn.execute(
+            "SELECT id, environment, version, started, user_id, timestamp, facts FROM sync_results"
+        ).fetchall()
+        assert rows == [
+            (
+                1,
+                "mainnet",
+                "11.1.0",
+                "2026-08-21 02:37:02.000000",
+                1,
+                "2026-08-21 02:37:02.000000",
+                None,
+            )
+        ]
 
     def test_running_twice_changes_nothing(self, conn: sqlite3.Connection) -> None:
         migrations_runner.apply(conn=conn)

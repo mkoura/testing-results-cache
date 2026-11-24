@@ -30,6 +30,33 @@ def _get_xml_root(junit_file: Path) -> etree._Element:
     return root
 
 
+def _parse_junit_timestamp(value: str) -> datetime:
+    """Parse a JUnit `<testsuite timestamp=...>` value into tz-aware UTC.
+
+    Accepts any offset and whole seconds, as pytest writes both. A value with
+    no offset is read as UTC.
+
+    Args:
+        value: The `timestamp` attribute of the `<testsuite>` element.
+
+    Returns:
+        The timestamp as tz-aware UTC.
+
+    Raises:
+        ValueError: When the value is not a usable ISO-8601 timestamp.
+    """
+    try:
+        parsed = datetime.fromisoformat(value)
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=UTC)
+        return parsed.astimezone(UTC)
+    except OverflowError as exc:
+        # A +/-24h offset overflows at either end of the year range. The
+        # import route answers 400 for a ValueError only.
+        err = f"Timestamp out of range: {value!r}"
+        raise ValueError(err) from exc
+
+
 def _get_verdict(testcase_record: etree._Element) -> str:
     """Parse testcase record and return it's info."""
     verdict = None
@@ -82,8 +109,7 @@ def get_testsuite_data(junit_file: Path) -> common.TestsuiteData:
 
     testsuite = testsuites[0]
     testcases_data = _get_testcases_data(testsuite=testsuite)
-    timestamp_str = testsuite.get("timestamp", "1970-01-01T00:00:00.000000").replace("+00:00", "")
-    timestamp = datetime.strptime(timestamp_str, "%Y-%m-%dT%H:%M:%S.%f").replace(tzinfo=UTC)
+    timestamp = _parse_junit_timestamp(testsuite.get("timestamp", "1970-01-01T00:00:00.000000"))
     testsuite_data = common.TestsuiteData(timestamp=timestamp, tests_verdicts=testcases_data)
 
     return testsuite_data

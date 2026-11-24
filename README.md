@@ -110,6 +110,8 @@ tcache-3-74-115-22.nip.io {
         reverse_proxy /history/* 127.0.0.1:8000
         reverse_proxy /sync-results 127.0.0.1:8000
         reverse_proxy /sync-results/* 127.0.0.1:8000
+        reverse_proxy /stats 127.0.0.1:8000
+        reverse_proxy /stats/* 127.0.0.1:8000
 }
 ```
 
@@ -203,37 +205,277 @@ history folder needs to stay bounded.
 
 ## Sync-test results cache
 
-Separate again from `/results` and `/history`: caches a zip of cardano-sync-tests
-results (JSON metrics plus rendered graphs) per cardano-node version, with no
-parsing. Unlike `/history`, there is only ever one entry per version - a new
-upload for a version replaces whatever was stored for it before, rather than
-being rejected as a duplicate. Entries for older versions are never pruned
-automatically; remove old rows/files manually if disk space becomes a
+Separate again from `/results` and `/history`: caches the results zip of one
+cardano-sync-tests run per row. A run is the cardano-node version in the URL
+plus two form fields, `environment` (the network, such as `mainnet`) and
+`started` (when the sync started, ISO 8601 with a UTC offset). A new upload
+for the same run replaces whatever was stored for it before, rather than
+being rejected as a duplicate; a second run of a version, or the same version
+on another network, is a second row. The upload stores the zip as it is. The
+[sync analyzer](#sync-analyzer) reads it afterwards.
+
+The zip is stored as `<id>.zip` under the sync-results folder, where `<id>` is
+the row id the upload answers with. Migration `004_sync_runs.sql` carries rows
+from before it over as mainnet runs started at their upload time; their zips
+are named `<version>.zip` and must be renamed to `<id>.zip` by hand, then
+`build-sync-analyzer --refresh-facts` reads them. Entries are never pruned
+automatically; remove old rows and files manually if disk space becomes a
 concern. A hard crash mid-upload can also leave stale `.upload-*.tmp` files
 under the sync-results folder; they are safe to delete. A hard crash can also
-leave a `<version>.zip.prev` file: this endpoint moves an existing zip aside
-to that name before replacing it, and only deletes it once the replacement is
+leave an `<id>.zip.prev` file: this endpoint moves an existing zip aside to
+that name before replacing it, and only deletes it once the replacement is
 confirmed stored, so a crash at exactly that point can leave it behind. Check
-that `<version>.zip` itself is present and correct before deleting the
-`.prev` file - if `<version>.zip` is missing or corrupt, `.prev` is the last
-good copy.
+that `<id>.zip` itself is present and correct before deleting the `.prev`
+file - if `<id>.zip` is missing or corrupt, `.prev` is the last good copy.
 
-Upload the results zip for a version:
+Upload the results zip of a run:
 
 ```sh
-curl -X PUT --fail-with-body -u username:password http://localhost:5000/sync-results/11.1.0 -F "syncresults=@/home/user/path/to/sync_results.zip"
+curl -X PUT --fail-with-body -u username:password http://localhost:5000/sync-results/11.1.0 \
+  -F "syncresults=@/home/user/path/to/sync_results.zip" \
+  -F "environment=mainnet" -F "started=2026-08-19T18:11:28+00:00"
 ```
 
-List every version that currently has a stored entry:
+List every run that currently has a stored entry, newest start first:
 
 ```sh
 curl -u username:password http://localhost:5000/sync-results
 ```
 
-Download the stored zip for a version:
+Download the stored zip of run 3:
 
 ```sh
-curl -u username:password http://localhost:5000/sync-results/11.1.0/zip
+curl -u username:password http://localhost:5000/sync-results/3/zip
+```
+
+## Per-run test statistics
+
+Stores the test counts for one run, as a small JSON document that the client
+computes from its allure results. No test report is parsed here. A run is
+identified by `project`, `testrun_name`, `run_id`, `step` and `origin`
+together. A re-upload with the same five fields replaces the row.
+
+Create a user for the uploader. The password is the token:
+
+```sh
+flask --app testing_results_cache.app:create_app add-user --username stats
+```
+
+Upload the counts for one run:
+
+```sh
+curl -X PUT --fail-with-body -u stats:token http://localhost:5000/stats \
+  -H 'Content-Type: application/json' -d '{
+  "schema": 1,
+  "project": "cardano-node-tests",
+  "testrun_name": "node-10.5.0",
+  "run_id": "1234",
+  "step": "main",
+  "origin": "ci",
+  "timestamp": "2026-05-31T00:39:35+01:00",
+  "duration": 4527.316,
+  "exit_code": 0,
+  "filtered": false,
+  "release": false,
+  "counts": {"total": 2145, "passed": 1892, "failed": 0, "broken": 0, "skipped": 253},
+  "quality": {"never_run": 0, "no_history_id": 0, "read_errors": 0},
+  "versions": {"cardano_node": "10.5.0", "cardano_cli": "10.11.1.0", "cardano_db_sync": null},
+  "commands": {"count": 213130, "submits": 9990, "coverage_pct": 31.01}
+}'
+```
+
+`step` defaults to `main`. `quality.never_run` is required and is a subset of
+`skipped`. `release` marks a run of a tagged release and `commands.submits`
+counts the submitted transactions. Other fields are stored but not returned.
+The body is capped at 64 kB.
+
+Read the totals, or list the runs newest first. `project`, `origin` (`ci` or
+`local`) and `days` (1 to 366) are optional filters on both routes.
+`/stats/runs` also takes `limit` (1 to 1000):
+
+```sh
+curl -u stats:token 'http://localhost:5000/stats?project=cardano-node-tests&origin=ci&days=30'
+curl -u stats:token 'http://localhost:5000/stats/runs?project=cardano-node-tests&limit=20'
+```
+
+The totals include a derived `other` count. A non-zero `never_run` means
+interrupted runs are included, so the totals are a lower bound.
+
+## Public dashboard
+
+A public page shows how much testing runs: test runs, tests executed, test
+time and CLI invocations, releases tested, and the issues our testing found
+upstream. It shows no pass or fail results. The page itself lives in the
+`cardano-node-tests` repository and is served by its GitHub Pages site. This
+service publishes only the page's data, `dashboard.json`, and it is off until
+`DASHBOARD_FOLDER` is set.
+
+After each stats upload, tcache rewrites `dashboard.json` in that folder. The
+web server serves the folder as static files, so visitors never reach the
+app. Keep the folder outside the instance directory, because everything in it
+is public.
+
+Turn it on in `$INSTANCE_PATH/config.py`:
+
+```python
+DASHBOARD_FOLDER = "/srv/tcache-dashboard"
+# GitHub logins whose upstream issues count as found by our testing.
+IMPACT_AUTHORS = ["mkoura", "ArturWieczorek", "OlufemiAdeOlusile", "saratomaz"]
+```
+
+The other impact settings have defaults: `IMPACT_OWNER` (`"IntersectMBO"`,
+the organisation whose public repositories are searched),
+`IMPACT_EXCLUDE_REPOS` (our own test repositories, left out of the search),
+`IMPACT_LABELLED` (`[["cardano-node-tests", "upstream bug"]]`, repositories
+and labels of issues filed by us for problems with no upstream issue) and
+`IMPACT_FILE` (where the fetched issues are stored, in the instance folder).
+
+Build the data once, so the file exists before the first upload:
+
+```sh
+flask --app testing_results_cache.app:create_app build-dashboard
+```
+
+Fetch the issues found by our testing from GitHub and rebuild the data. Nothing
+runs this for you: put it in a daily cron job or systemd timer. Only public
+repositories are searched. A read-only GitHub token raises the search rate
+limit. Set it in the `IMPACT_GITHUB_TOKEN` environment variable rather than in
+`config.py`:
+
+```sh
+IMPACT_GITHUB_TOKEN=<token> flask --app testing_results_cache.app:create_app update-impact
+```
+
+If GitHub cannot be reached, the command exits non-zero and the stored issues
+stay as they were.
+
+Serve the folder with Caddy. The page fetches the file from another origin, so
+allow that origin. Hide the dot files, which are the lock and the temporary
+file used while the data is replaced:
+
+```caddyfile
+dashboard.example.org {
+    root * /srv/tcache-dashboard
+    encode gzip
+    header {
+        Access-Control-Allow-Origin https://tests.cardano.intersectmbo.org
+        X-Content-Type-Options nosniff
+        Referrer-Policy no-referrer
+    }
+    file_server {
+        hide .*
+    }
+}
+```
+
+The page's data URL must point at this site. The stats come from
+`cardano-node-tests`, which uploads them at the end of each test run when its
+`ENABLE_TCACHE_STATS` repository variable is set. `cardano-sync-tests` uploads
+its runs the same way. They count as two more test types, node sync and
+db-sync, with the sync time as their test time, and the "Sync tests" panel
+adds the network and version detail.
+
+### Try the dashboard locally
+
+With the virtual environment active (see [Install](#install)), use a separate
+instance, because `init-db` drops every table:
+
+```sh
+export INSTANCE_PATH="$HOME/tcache-local/instance"
+mkdir -p "$INSTANCE_PATH" "$HOME/tcache-local/site"
+echo "DASHBOARD_FOLDER = '$HOME/tcache-local/site'" > "$INSTANCE_PATH/config.py"
+flask --app testing_results_cache.app:create_app init-db
+flask --app testing_results_cache.app:create_app add-user --username ci
+flask --app testing_results_cache.app:create_app build-dashboard
+flask --app 'testing_results_cache.app:create_app()' --debug run
+```
+
+Copy the page from a `cardano-node-tests` checkout
+(`src_docs/source/extra/dashboard/`) into the same folder, set the `content`
+of the `dashboard-data` meta tag in its `index.html` to `dashboard.json`, then
+serve the folder in a second terminal and open `http://localhost:8995/`:
+
+```sh
+python3 -m http.server 8995 --bind 127.0.0.1 --directory "$HOME/tcache-local/site"
+```
+
+The page fills as stats arrive. Upload them with the `curl` example under
+[Per-run test statistics](#per-run-test-statistics), with a recent `timestamp`
+so the run shows in the charts and not only in the all-time totals, or from a
+`cardano-node-tests` checkout with `ENABLE_TCACHE_STATS=true`,
+`TCACHE_BASIC_AUTH=ci:<password>` and `TCACHE_URL=http://127.0.0.1:5000/results`
+set.
+
+## Sync analyzer
+
+A public page lets a visitor pick one to four stored sync runs, see their
+graphs on one set of axes with a table of numbers, and download each run's
+zip. Like the dashboard, the page lives in the `cardano-node-tests` repository
+(`src_docs/source/extra/sync-analyzer/`) and this service publishes only its
+data. Three things are public:
+
+- `sync_analyzer.json` in `DASHBOARD_FOLDER`: every stored run with the
+  numbers read from its `node_sync_results.json`. Rewritten after each
+  sync-results upload, like `dashboard.json`.
+- `GET /sync-analyzer/graphs/<ids>/<graph>.png`: a graph of the runs named by
+  `<ids>`, their row ids in ascending order joined by `-`, at most four, all
+  on one network. `<graph>` is one of the seven node graph names
+  `sync_static_graphs.py` writes, such as `nodesync_progress`. The first
+  request for a pick runs the script and keeps its output under
+  `SYNC_GRAPHS_FOLDER`; the service draws one pick at a time and answers 503
+  with `Retry-After` while another pick is being drawn. A rendered pick is
+  named by its runs and the time of their newest upload, so a new upload
+  leads to a fresh render; the newest 200 picks are kept.
+- `GET /sync-analyzer/runs/<id>/zip`: the stored zip of a run, without login.
+
+The graphs are drawn by `sync_static_graphs.py` from `cardano-sync-tests`,
+the script behind the published sync reports, so this service needs a
+checkout of that repository with its dependencies installed, at a revision
+that writes `nodesync_progress.png` (its pull request 190 or later; an older
+script draws the other six graphs and the page shows the first as missing).
+Install it next to this service and name how to run the script in
+`$INSTANCE_PATH/config.py`:
+
+```python
+SYNC_GRAPHS_COMMAND = [
+    "/home/tcache/cardano-sync-tests/.venv/bin/python",
+    "/home/tcache/cardano-sync-tests/sync_tests/scripts/sync_static_graphs.py",
+]
+```
+
+Until it is set, the graph route answers 503 for a pick not yet drawn and
+the rest of the analyzer works. `SYNC_GRAPHS_FOLDER` (default
+`$INSTANCE_PATH/sync_graphs`) holds the rendered picks and is safe to empty
+at any time. `SYNC_GRAPHS_TIMEOUT` (default 300 seconds) bounds one run of
+the script. The render happens inside the request, so give gunicorn a worker
+timeout above it, for example `--timeout 330` in `start_service.sh`; with
+its default of 30 seconds a four-run pick is killed half way.
+
+Forward the routes from the dashboard site, so they share the page's
+allowed origin:
+
+```caddyfile
+dashboard.example.org {
+    root * /srv/tcache-dashboard
+    encode gzip
+    header {
+        Access-Control-Allow-Origin https://tests.cardano.intersectmbo.org
+        X-Content-Type-Options nosniff
+        Referrer-Policy no-referrer
+    }
+    reverse_proxy /sync-analyzer/* 127.0.0.1:8000
+    file_server {
+        hide .*
+    }
+}
+```
+
+Rebuild the run list by hand, for example after renaming zips from before
+migration 004, with `--refresh-facts` to read every zip again; a zip whose
+facts cannot be read is reported and its facts are left as they were:
+
+```sh
+flask --app testing_results_cache.app:create_app build-sync-analyzer --refresh-facts
 ```
 
 ## Run tests
