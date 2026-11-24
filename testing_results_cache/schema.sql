@@ -43,17 +43,24 @@ CREATE TABLE history (
     UNIQUE (testrun_name, job_id)
 );
 
--- Cached sync-test-results zips (JSON metrics + rendered graphs), keyed by
--- cardano-node version only. Unlike history, this upserts: a new upload
--- for a version replaces whatever was stored for it before, so there is
--- only ever one row per version.
+-- Cached sync-test-results zips, one row per sync run. A run is identified
+-- by network, cardano-node version and start time together. Unlike history,
+-- this upserts: a new upload for the same run replaces whatever was stored
+-- for it before. Kept in step with migrations/004_sync_runs.sql.
 CREATE TABLE sync_results (
-    version TEXT PRIMARY KEY,
+    id INTEGER PRIMARY KEY,
+    environment TEXT NOT NULL,
+    version TEXT NOT NULL,
+    -- When the sync started, as the uploader reports it. Deliberately TEXT,
+    -- not TIMESTAMP: see the comment on history.timestamp above. Same
+    -- reasoning, same format, formatted/parsed by sync_results_cache.py.
+    started TEXT NOT NULL,
     user_id INTEGER,
-    -- Deliberately TEXT, not TIMESTAMP: see the comment on history.timestamp
-    -- above. Same reasoning, same format, formatted/parsed by
-    -- sync_results_cache.py itself.
-    timestamp TEXT NOT NULL
+    timestamp TEXT NOT NULL,
+    -- The numbers the sync analyzer shows, read from the zip at upload.
+    -- NULL when the zip holds no readable node results file.
+    facts TEXT,
+    UNIQUE (environment, version, started)
 );
 
 -- Kept in step with migrations/003_testrun_stats.sql, which comments each column.
@@ -86,6 +93,9 @@ CREATE TABLE testrun_stats (
 CREATE INDEX idx_results_testrun_user ON results(testrun_id, user_id);
 CREATE INDEX idx_testrun_name ON testrun(name);
 CREATE INDEX idx_users_name ON users(name);
+
+-- Kept in step with migrations/004_sync_runs.sql.
+CREATE INDEX idx_sync_results_started ON sync_results(started);
 
 -- Kept in step with migrations/003_testrun_stats.sql.
 CREATE INDEX idx_testrun_stats_ts ON testrun_stats(timestamp);

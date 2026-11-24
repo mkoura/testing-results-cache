@@ -41,6 +41,22 @@ BASE: dict = {
     "commands": {"count": 1000, "coverage_pct": 30.0},
 }
 
+SYNC_BASE: dict = {
+    "schema": 1,
+    "project": "cardano-sync-tests",
+    "testrun_name": "sync-node-mainnet",
+    "run_id": "40689480314",
+    "step": "main",
+    "origin": "ci",
+    "timestamp": NOW.isoformat(),
+    "duration": 132111.0,
+    "exit_code": 0,
+    "counts": {"total": 4, "passed": 4, "failed": 0, "broken": 0, "skipped": 0},
+    "quality": {"never_run": 0},
+    "versions": {"cardano_node": "11.2.0", "cardano_cli": "11.6.0.0", "cardano_db_sync": None},
+    "sync": {"env": "mainnet", "kind": "node", "cpu_cores": 32, "ram_gb": 134},
+}
+
 # Every key a document may carry. Anything else reaching the file is a leak.
 TOP_KEYS = {
     "schema",
@@ -51,7 +67,9 @@ TOP_KEYS = {
     "daily",
     "latest",
     "releases",
+    "sync",
 }
+SYNC_RUN_KEYS = {"started", "kind", "network", "source", "seconds", "completed", "node", "db_sync"}
 TEST_RUN_KEYS = {
     "name",
     "source",
@@ -66,7 +84,7 @@ TEST_RUN_KEYS = {
     "last",
 }
 DAILY_KEYS = {"date", "name", "source", "runs", "tests", "seconds", "invocations", "submits"}
-LATEST_KEYS = {"started", "name", "source", "steps", "tests", "seconds", "node"}
+LATEST_KEYS = {"started", "name", "source", "steps", "tests", "seconds", "node", "db_sync"}
 RELEASE_KEYS = {"name", "version", "runs", "tests", "last"}
 UPGRADE_STEPS = 3
 OLD_DAYS = dashboard.WINDOW_DAYS + 5
@@ -84,6 +102,13 @@ SKIP_SKIPPED = 25
 def _doc(**overrides: object) -> dict:
     """Return an upload document with the given top-level fields replaced."""
     out = copy.deepcopy(BASE)
+    out.update(overrides)
+    return out
+
+
+def _sync_doc(**overrides: object) -> dict:
+    """Return a sync run upload document with the given top-level fields replaced."""
+    out = copy.deepcopy(SYNC_BASE)
     out.update(overrides)
     return out
 
@@ -261,6 +286,7 @@ class TestBuild:
                 quality={"never_run": 0, "no_history_id": 0, "read_errors": 0, "x": marker},
             ),
         )
+        _upload(client, auth_headers, _sync_doc(notes=marker, sync={"host": marker}))
         doc = _build(app)
         assert marker not in json.dumps(doc)
         assert set(doc) == TOP_KEYS
@@ -268,6 +294,69 @@ class TestBuild:
         assert all(set(d) == DAILY_KEYS for d in doc["daily"])
         assert all(set(r) == LATEST_KEYS for r in doc["latest"])
         assert all(set(r) == RELEASE_KEYS for r in doc["releases"])
+        assert set(doc["sync"]) == {"runs"}
+        assert all(set(r) == SYNC_RUN_KEYS for r in doc["sync"]["runs"])
+
+    def test_sync_runs_are_their_own_test_types(
+        self, app: flask.Flask, client: flask.testing.FlaskClient, auth_headers: dict
+    ) -> None:
+        """Count a sync run with the others, typed node-sync or db-sync, timed by its sync."""
+        _upload(client, auth_headers, _doc(counts=_counts(100), duration=10.0))
+        _upload(client, auth_headers, _sync_doc())
+        _upload(
+            client,
+            auth_headers,
+            _sync_doc(
+                testrun_name="sync-dbsync-preview",
+                run_id="2",
+                duration=14852.0,
+                counts={"total": 9, "passed": 8, "failed": 0, "broken": 0, "skipped": 1},
+                versions={"cardano_node": "11.1.1", "cardano_db_sync": "13.7.2.1"},
+            ),
+        )
+        doc = _build(app)
+        assert doc["all_time"]["runs"] == 1 + 1 + 1
+        assert doc["all_time"]["tests"] == 100 + 4 + 8
+        assert doc["all_time"]["seconds"] == 10.0 + 132111.0 + 14852.0
+        assert {(t["name"], t["type"]) for t in doc["test_runs"]} == {
+            ("nightly", "regression"),
+            ("sync-node-mainnet", "node-sync"),
+            ("sync-dbsync-preview", "db-sync"),
+        }
+        assert sorted((r["name"], r["node"], r["db_sync"]) for r in doc["latest"]) == [
+            ("nightly", "10.5.0", None),
+            ("sync-dbsync-preview", "11.1.1", "13.7.2.1"),
+            ("sync-node-mainnet", "11.2.0", None),
+        ]
+
+    def test_sync_runs_in_the_window_carry_their_detail(
+        self, app: flask.Flask, client: flask.testing.FlaskClient, auth_headers: dict
+    ) -> None:
+        """List the window's sync runs newest first with network, versions and completion."""
+        _upload(client, auth_headers, _sync_doc(run_id="1", timestamp=_ago(2), duration=132111.0))
+        _upload(
+            client,
+            auth_headers,
+            _sync_doc(
+                run_id="2",
+                testrun_name="sync-dbsync-preview",
+                timestamp=_ago(1),
+                duration=14852.0,
+                exit_code=1,
+                versions={"cardano_node": "11.1.1", "cardano_db_sync": "13.7.2.1"},
+            ),
+        )
+        _upload(
+            client, auth_headers, _sync_doc(run_id="3", timestamp=_ago(OLD_DAYS), duration=116618.0)
+        )
+        runs = _build(app)["sync"]["runs"]
+        assert [
+            (r["kind"], r["network"], r["node"], r["db_sync"], r["seconds"], r["completed"])
+            for r in runs
+        ] == [
+            ("dbsync", "preview", "11.1.1", "13.7.2.1", 14852.0, False),
+            ("node", "mainnet", "11.2.0", None, 132111.0, True),
+        ]
 
     def test_a_broken_stored_document_is_tolerated(
         self, app: flask.Flask, client: flask.testing.FlaskClient, auth_headers: dict
