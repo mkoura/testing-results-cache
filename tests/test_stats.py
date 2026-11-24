@@ -313,6 +313,7 @@ class TestValidation:
         response = client.get("/stats", headers=auth_headers)
 
         def _no_constants(name: str) -> float:
+            """Refuse every JSON constant, as the endpoint does."""
             msg = f"non-finite {name} in response"
             raise AssertionError(msg)
 
@@ -495,6 +496,7 @@ class TestValidation:
             stored = conn.execute("SELECT payload FROM testrun_stats").fetchone()[0]
 
         def _no_constants(name: str) -> float:
+            """Refuse every JSON constant, as the endpoint does."""
             msg = f"non-finite {name} in stored payload"
             raise AssertionError(msg)
 
@@ -963,6 +965,7 @@ class TestStorageFailures:
         exc.sqlite_errorcode = sqlite3.SQLITE_BUSY
 
         def _busy(**_kwargs: object) -> None:
+            """Fail the write with a busy database error."""
             raise exc
 
         monkeypatch.setattr(stats_api.stats_cache, "save_testrun_stats", _busy)
@@ -981,6 +984,7 @@ class TestStorageFailures:
         exc.sqlite_errorcode = 517
 
         def _busy(**_kwargs: object) -> None:
+            """Fail the write with a busy database error."""
             raise exc
 
         monkeypatch.setattr(stats_api.stats_cache, "save_testrun_stats", _busy)
@@ -995,9 +999,66 @@ class TestStorageFailures:
         """Report a non-transient write failure as a JSON 500."""
 
         def _boom(**_kwargs: object) -> None:
+            """Fail the write with a hard database error."""
             msg = "disk I/O error"
             raise sqlite3.DatabaseError(msg)
 
+        monkeypatch.setattr(stats_api.stats_cache, "save_testrun_stats", _boom)
+
+        response = _put(client, auth_headers, VALID_PAYLOAD)
+
+        assert response.status_code == http.HTTPStatus.INTERNAL_SERVER_ERROR
+        assert response.json["message"] == "Failed to store testrun stats"
+
+    def test_a_non_busy_operational_error_is_a_json_500(
+        self, client: flask.testing.FlaskClient, auth_headers: dict, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Report an OperationalError other than busy as a failure, not a retry."""
+        exc = sqlite3.OperationalError("disk I/O error")
+        exc.sqlite_errorcode = sqlite3.SQLITE_IOERR
+
+        def _ioerr(**_kwargs: object) -> None:
+            """Fail the write with an I/O error that is not busy."""
+            raise exc
+
+        monkeypatch.setattr(stats_api.stats_cache, "save_testrun_stats", _ioerr)
+
+        response = _put(client, auth_headers, VALID_PAYLOAD)
+
+        assert response.status_code == http.HTTPStatus.INTERNAL_SERVER_ERROR
+        assert response.json["message"] == "Failed to store testrun stats"
+
+    def test_a_failed_rollback_is_still_a_json_500(
+        self,
+        client: flask.testing.FlaskClient,
+        auth_headers: dict,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Keep the JSON 500 when the rollback after a failed write also fails."""
+        real_get_db = flask_db.get_db
+
+        class _NoRollback:
+            """Wrap a connection whose rollback always fails."""
+
+            def __init__(self, conn: sqlite3.Connection) -> None:
+                """Keep the wrapped connection."""
+                self._conn = conn
+
+            def __getattr__(self, name: str) -> object:
+                """Pass every other attribute to the wrapped connection."""
+                return getattr(self._conn, name)
+
+            def rollback(self) -> None:
+                """Fail the rollback."""
+                msg = "cannot roll back"
+                raise sqlite3.OperationalError(msg)
+
+        def _boom(**_kwargs: object) -> None:
+            """Fail the write with a hard database error."""
+            msg = "disk I/O error"
+            raise sqlite3.DatabaseError(msg)
+
+        monkeypatch.setattr(stats_api.flask_db, "get_db", lambda: _NoRollback(real_get_db()))
         monkeypatch.setattr(stats_api.stats_cache, "save_testrun_stats", _boom)
 
         response = _put(client, auth_headers, VALID_PAYLOAD)
@@ -1012,6 +1073,7 @@ class TestStorageFailures:
         original = stats_api.stats_cache.save_testrun_stats
 
         def _save_then_fail(**kwargs: object) -> None:
+            """Store the row, then fail as if the commit was refused."""
             original(**kwargs)  # type: ignore[arg-type]
             msg = "commit refused"
             raise sqlite3.DatabaseError(msg)
@@ -1034,6 +1096,7 @@ class TestReadFailures:
         """An unrun migration must not break the JSON-error contract."""
 
         def _boom(**_kwargs: object) -> None:
+            """Fail the read with a database error."""
             msg = "no such table: testrun_stats"
             raise sqlite3.OperationalError(msg)
 
@@ -1050,6 +1113,7 @@ class TestReadFailures:
         """Report a failed listing as a JSON 500."""
 
         def _boom(**_kwargs: object) -> None:
+            """Fail the read with a database error."""
             msg = "no such table: testrun_stats"
             raise sqlite3.OperationalError(msg)
 

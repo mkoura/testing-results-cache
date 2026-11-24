@@ -1,8 +1,12 @@
+import json
+import os
 import re
 from datetime import datetime
+from pathlib import Path
 from typing import List
 from typing import NamedTuple
 from typing import NoReturn
+from typing import Optional
 
 import flask
 
@@ -16,6 +20,29 @@ MAX_PATH_SEGMENT_LENGTH = 200
 # Dots are allowed so real-world testrun names like "node-8.5.0" work, but a
 # segment of dots only ("..", ".") is rejected in `valid_path_segment`.
 _SAFE_SEGMENT_RE = re.compile(r"[A-Za-z0-9_.-]+")
+
+
+def replace_json(path: Path, data: dict) -> None:
+    """Replace a JSON file in one step.
+
+    The new file is written next to the old one, flushed to disk, and renamed
+    over it, so a reader gets either the whole old file or the whole new one.
+
+    Args:
+        path: The file to replace.
+        data: The document to write.
+
+    Raises:
+        ValueError: When `data` holds inf or NaN, which JSON cannot carry. The
+            old file is kept.
+    """
+    text = json.dumps(data, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
+    tmp = path.with_name(f".{path.name}.tmp")
+    with tmp.open("w", encoding="utf-8") as f:
+        f.write(text)
+        f.flush()
+        os.fsync(f.fileno())
+    tmp.replace(path)
 
 
 def abort_json(status_code: int, message: str, headers: dict | None = None) -> NoReturn:
@@ -99,16 +126,29 @@ class HistoryEntry(NamedTuple):
 
 
 class SyncResultsEntry(NamedTuple):
-    """Record that a sync-results zip exists for a node version, and when it landed.
+    """Record that a sync-results zip exists for one sync run, and when it landed.
 
-    Unlike HistoryEntry, there is only ever one row per version: a new
-    upload replaces the old one instead of being rejected as a duplicate.
-    `timestamp` is always tz-aware UTC, attached by
-    `sync_results_cache._parse_timestamp` when rows are read back.
+    A run is one network, one node version and one start time. Unlike
+    HistoryEntry, a new upload for the same run replaces the old one instead
+    of being rejected as a duplicate. `started` and `timestamp` are always
+    tz-aware UTC, attached by `sync_results_cache._parse_timestamp` when rows
+    are read back.
+
+    Attributes:
+        id: The row id, which names the zip on disk.
+        environment: The network the node synced, such as `mainnet`.
+        version: The cardano-node version or commit under test.
+        started: When the sync started, as the uploader reported it.
+        timestamp: When the zip was uploaded.
+        facts: The numbers the sync analyzer shows, or None.
     """
 
+    id: int
+    environment: str
     version: str
+    started: datetime
     timestamp: datetime
+    facts: Optional[dict] = None
 
 
 class TestrunStatsEntry(NamedTuple):
