@@ -465,7 +465,9 @@ timeout above it, for example `--timeout 330` in `start_service.sh`; with
 its default of 30 seconds a four-run pick is killed half way.
 
 Forward the routes from the dashboard site, so they share the page's
-allowed origin:
+allowed origin. Expose `Retry-After` to the page: a browser hides that header
+from a page on another origin, and the page then shows the busy answer as an
+error and does not try again:
 
 ```caddyfile
 dashboard.example.org {
@@ -473,6 +475,7 @@ dashboard.example.org {
     encode gzip
     header {
         Access-Control-Allow-Origin https://tests.cardano.intersectmbo.org
+        Access-Control-Expose-Headers Retry-After
         X-Content-Type-Options nosniff
         Referrer-Policy no-referrer
     }
