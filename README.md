@@ -100,20 +100,24 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now tcache
 ```
 
-Setup a proxy HTTP server (e.g. [Caddy](https://caddyserver.com/)) and point it to the service.
+Set up a proxy HTTP server (e.g. [Caddy](https://caddyserver.com/)) to serve the
+API under `/tcache`. For Caddy, use this in `/etc/caddy/Caddyfile`:
 
-For Caddy, the `/etc/caddy/Caddyfile` would look like
+```caddyfile
+cardano-tests-api-2-70-224-86.nip.io {
+    redir /tcache /tcache/ 308
 
-```text
-tcache-3-74-115-22.nip.io {
-        reverse_proxy /results/* 127.0.0.1:8000
-        reverse_proxy /history/* 127.0.0.1:8000
-        reverse_proxy /sync-results 127.0.0.1:8000
-        reverse_proxy /sync-results/* 127.0.0.1:8000
-        reverse_proxy /stats 127.0.0.1:8000
-        reverse_proxy /stats/* 127.0.0.1:8000
+    handle_path /tcache/* {
+        reverse_proxy 127.0.0.1:8000
+    }
+
+    respond 404
 }
 ```
+
+`handle_path` strips `/tcache` before forwarding the request to Flask. Set
+`TCACHE_URL` to `https://cardano-tests-api-2-70-224-86.nip.io/tcache`. Clients
+append endpoints such as `/results/...` or `/stats` to this base URL.
 
 ## Run the service for local development
 
@@ -125,34 +129,42 @@ flask --app 'testing_results_cache.app:create_app()' --debug run
 
 ## Queries
 
+Set `TCACHE_URL` to the deployment's API base URL. For Flask running directly
+on your machine, use:
+
+```sh
+export TCACHE_URL=http://localhost:5000
+```
+
 Submit results:
 
 ```sh
-curl -X PUT --fail-with-body -u username:password http://localhost:5000/results/testrun1/1/import -F "junitxml=@/home/user/path/to/junit.xml"
+curl -X PUT --fail-with-body -u username:password \
+  "${TCACHE_URL%/}/results/testrun1/1/import" -F "junitxml=@/home/user/path/to/junit.xml"
 ```
 
 Get passed tests in given testrun:
 
 ```sh
-curl -u username:password http://localhost:5000/results/testrun1/passed
+curl -u username:password "${TCACHE_URL%/}/results/testrun1/passed"
 ```
 
 Get passed tests in given testrun formatted as pytest nodeid:
 
 ```sh
-curl -u username:password http://localhost:5000/results/testrun1/pypassed
+curl -u username:password "${TCACHE_URL%/}/results/testrun1/pypassed"
 ```
 
 Get tests that need re-run in given testrun:
 
 ```sh
-curl -u username:password http://localhost:5000/results/testrun1/rerun
+curl -u username:password "${TCACHE_URL%/}/results/testrun1/rerun"
 ```
 
 Get tests formatted as pytest nodeid that need re-run in given testrun:
 
 ```sh
-curl -u username:password http://localhost:5000/results/testrun1/pyrerun
+curl -u username:password "${TCACHE_URL%/}/results/testrun1/pyrerun"
 ```
 
 ## Nightly run history
@@ -167,19 +179,20 @@ delete.
 Upload the JUnit XML for a nightly job:
 
 ```sh
-curl -X PUT --fail-with-body -u username:password http://localhost:5000/history/testrun1/job1 -F "junitxml=@/home/user/path/to/junit.xml"
+curl -X PUT --fail-with-body -u username:password \
+  "${TCACHE_URL%/}/history/testrun1/job1" -F "junitxml=@/home/user/path/to/junit.xml"
 ```
 
 List recorded jobs for a testrun within the last N days (default 5):
 
 ```sh
-curl -u username:password 'http://localhost:5000/history/testrun1?days=7'
+curl -u username:password "${TCACHE_URL%/}/history/testrun1?days=7"
 ```
 
 Download the stored JUnit XML for a job:
 
 ```sh
-curl -u username:password http://localhost:5000/history/testrun1/job1/xml
+curl -u username:password "${TCACHE_URL%/}/history/testrun1/job1/xml"
 ```
 
 ## Pruning old history
@@ -231,7 +244,7 @@ file - if `<id>.zip` is missing or corrupt, `.prev` is the last good copy.
 Upload the results zip of a run:
 
 ```sh
-curl -X PUT --fail-with-body -u username:password http://localhost:5000/sync-results/11.1.0 \
+curl -X PUT --fail-with-body -u username:password "${TCACHE_URL%/}/sync-results/11.1.0" \
   -F "syncresults=@/home/user/path/to/sync_results.zip" \
   -F "environment=mainnet" -F "started=2026-08-19T18:11:28+00:00"
 ```
@@ -239,13 +252,13 @@ curl -X PUT --fail-with-body -u username:password http://localhost:5000/sync-res
 List every run that currently has a stored entry, newest start first:
 
 ```sh
-curl -u username:password http://localhost:5000/sync-results
+curl -u username:password "${TCACHE_URL%/}/sync-results"
 ```
 
 Download the stored zip of run 3:
 
 ```sh
-curl -u username:password http://localhost:5000/sync-results/3/zip
+curl -u username:password "${TCACHE_URL%/}/sync-results/3/zip"
 ```
 
 ## Per-run test statistics
@@ -264,7 +277,7 @@ flask --app testing_results_cache.app:create_app add-user --username stats
 Upload the counts for one run:
 
 ```sh
-curl -X PUT --fail-with-body -u stats:token http://localhost:5000/stats \
+curl -X PUT --fail-with-body -u stats:token "${TCACHE_URL%/}/stats" \
   -H 'Content-Type: application/json' -d '{
   "schema": 1,
   "project": "cardano-node-tests",
@@ -294,8 +307,8 @@ Read the totals, or list the runs newest first. `project`, `origin` (`ci` or
 `/stats/runs` also takes `limit` (1 to 1000):
 
 ```sh
-curl -u stats:token 'http://localhost:5000/stats?project=cardano-node-tests&origin=ci&days=30'
-curl -u stats:token 'http://localhost:5000/stats/runs?project=cardano-node-tests&limit=20'
+curl -u stats:token "${TCACHE_URL%/}/stats?project=cardano-node-tests&origin=ci&days=30"
+curl -u stats:token "${TCACHE_URL%/}/stats/runs?project=cardano-node-tests&limit=20"
 ```
 
 The totals include a derived `other` count. A non-zero `never_run` means
@@ -403,7 +416,7 @@ The page fills as stats arrive. Upload them with the `curl` example under
 [Per-run test statistics](#per-run-test-statistics), with a recent `timestamp`
 so the run shows in the charts and not only in the all-time totals, or from a
 `cardano-node-tests` checkout with `ENABLE_TCACHE_STATS=true`,
-`TCACHE_BASIC_AUTH=ci:<password>` and `TCACHE_URL=http://127.0.0.1:5000/results`
+`TCACHE_BASIC_AUTH=ci:<password>` and `TCACHE_URL=http://127.0.0.1:5000`
 set.
 
 ## Sync analyzer
@@ -483,6 +496,20 @@ flask --app testing_results_cache.app:create_app build-sync-analyzer --refresh-f
 ```sh
 make test
 ```
+
+### Check a deployment
+
+Export `TCACHE_URL` (the API base URL, for example
+`https://cardano-tests-api-2-70-224-86.nip.io/tcache`) and `TCACHE_BASIC_AUTH`
+(`username:password`), then run:
+
+```sh
+uv run pytest tests/test_deployment.py
+```
+
+These smoke tests are also collected by `make test` and are skipped if either
+variable is missing or empty. They use only read-only GET endpoints and work
+with an empty database.
 
 ## Run linters
 
