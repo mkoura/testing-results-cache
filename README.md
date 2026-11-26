@@ -4,6 +4,13 @@ Cache testing results from test runs so failures can be re-tested without re-run
 
 ## Install
 
+Run the API and public dashboard with one tcache deployment: one Gunicorn
+service, one `INSTANCE_PATH`, and one database. The service writes the
+dashboard's public data, Caddy serves it, and GitHub Pages hosts the dashboard
+page itself.
+
+### Install the application
+
 Create `tcache` user and group
 
 ```sh
@@ -37,7 +44,7 @@ This creates a `.venv` virtual environment. Activate it with
 . .venv/bin/activate
 ```
 
-## Setup
+### Setup
 
 The `flask` commands below do not read `start_service.sh`, so they do not
 inherit its `INSTANCE_PATH`. Point them at the same directory the service uses,
@@ -82,26 +89,61 @@ Repeat for confirmation:
 Added user team.
 ```
 
-## Run the service
+### Enable the public dashboard
 
-Copy & edit `start_service.sh`
+To publish dashboard data, create a dedicated output directory outside the
+instance directory. Run this as an administrator:
+
+```sh
+sudo install -d -o tcache -g tcache -m 0755 /srv/tcache-dashboard
+```
+
+As `tcache`, add this setting to the same `$INSTANCE_PATH/config.py` the API
+uses. Create the file if it does not exist:
+
+```python
+DASHBOARD_FOLDER = "/srv/tcache-dashboard"
+```
+
+With the virtual environment active and `INSTANCE_PATH` still set, build the
+initial file from the shared database:
+
+```sh
+flask --app testing_results_cache.app:create_app build-dashboard
+```
+
+If the API is already deployed, reuse its instance directory and database.
+Skip `init-db` and run `sudo systemctl restart tcache` after changing
+`config.py`. See [Public dashboard](#public-dashboard) for the optional GitHub
+issue counts.
+
+### Run the service
+
+As `tcache`, copy `start_service.sh` to the checkout root:
 
 ```sh
 cp examples/start_service.sh .
-vim start_service.sh
 ```
 
-Create systemd unit file and start the service
+As an administrator, install the systemd unit and start the service. If you
+used a custom `INSTANCE_PATH`, set the same absolute path with `Environment=`
+in the unit's `[Service]` section. Check that `ExecStart` points to your
+checkout:
 
 ```sh
-sudo cp examples/tcache.service /etc/systemd/system/tcache.service
+sudo cp /home/tcache/testing-results-cache/examples/tcache.service /etc/systemd/system/tcache.service
 sudo vim /etc/systemd/system/tcache.service
 sudo systemctl daemon-reload
 sudo systemctl enable --now tcache
 ```
 
-Set up a proxy HTTP server (e.g. [Caddy](https://caddyserver.com/)) to serve the
-API under `/tcache`. For Caddy, use this in `/etc/caddy/Caddyfile`:
+### Publish the API and dashboard data
+
+Configure [Caddy](https://caddyserver.com/) in `/etc/caddy/Caddyfile`. The API
+site forwards requests to the tcache service. The dashboard data site serves
+the public JSON files directly from disk. Use your own hostnames, and set
+`Access-Control-Allow-Origin` to the origin that hosts the dashboard page.
+If you are deploying only the API, omit the `dashboard.example.org` block.
 
 ```caddyfile
 cardano-tests-api-2-70-224-86.nip.io {
@@ -113,11 +155,39 @@ cardano-tests-api-2-70-224-86.nip.io {
 
     respond 404
 }
+
+dashboard.example.org {
+    @dashboard_data path /dashboard.json /sync_analyzer.json
+    handle @dashboard_data {
+        root * /srv/tcache-dashboard
+        encode gzip
+        header {
+            Access-Control-Allow-Origin https://tests.cardano.intersectmbo.org
+            X-Content-Type-Options nosniff
+            Referrer-Policy no-referrer
+        }
+        file_server
+    }
+
+    respond 404
+}
+```
+
+Validate the configuration and reload Caddy:
+
+```sh
+sudo caddy validate --config /etc/caddy/Caddyfile
+sudo systemctl reload caddy
 ```
 
 `handle_path` strips `/tcache` before forwarding the request to Flask. Set
 `TCACHE_URL` to `https://cardano-tests-api-2-70-224-86.nip.io/tcache`. Clients
 append endpoints such as `/results/...` or `/stats` to this base URL.
+
+Set the GitHub Pages dashboard's `dashboard-data` meta tag to the public
+`dashboard.json` URL, for example `https://dashboard.example.org/dashboard.json`.
+See [Sync analyzer](#sync-analyzer) to add public graphs and downloads through
+the same service.
 
 ## Run the service for local development
 
@@ -323,16 +393,13 @@ upstream. It shows no pass or fail results. The page itself lives in the
 service publishes only the page's data, `dashboard.json`, and it is off until
 `DASHBOARD_FOLDER` is set.
 
-After each stats upload, tcache rewrites `dashboard.json` in that folder. The
-web server serves the folder as static files, so visitors never reach the
-app. Keep the folder outside the instance directory, because everything in it
-is public.
+After each stats upload, tcache rewrites `dashboard.json` in that folder.
+Caddy serves the file directly to dashboard visitors. See
+[Enable the public dashboard](#enable-the-public-dashboard) for setup.
 
-Turn it on in `$INSTANCE_PATH/config.py`:
+To include GitHub issue counts, set the authors in `$INSTANCE_PATH/config.py`:
 
 ```python
-DASHBOARD_FOLDER = "/srv/tcache-dashboard"
-# GitHub logins whose upstream issues count as found by our testing.
 IMPACT_AUTHORS = ["mkoura", "ArturWieczorek", "OlufemiAdeOlusile", "saratomaz"]
 ```
 
@@ -342,12 +409,6 @@ the organisation whose public repositories are searched),
 `IMPACT_LABELLED` (`[["cardano-node-tests", "upstream bug"]]`, repositories
 and labels of issues filed by us for problems with no upstream issue) and
 `IMPACT_FILE` (where the fetched issues are stored, in the instance folder).
-
-Build the data once, so the file exists before the first upload:
-
-```sh
-flask --app testing_results_cache.app:create_app build-dashboard
-```
 
 Fetch the issues found by our testing from GitHub and rebuild the data. Nothing
 runs this for you: put it in a daily cron job or systemd timer. Only public
@@ -362,31 +423,11 @@ IMPACT_GITHUB_TOKEN=<token> flask --app testing_results_cache.app:create_app upd
 If GitHub cannot be reached, the command exits non-zero and the stored issues
 stay as they were.
 
-Serve the folder with Caddy. The page fetches the file from another origin, so
-allow that origin. Hide the dot files, which are the lock and the temporary
-file used while the data is replaced:
-
-```caddyfile
-dashboard.example.org {
-    root * /srv/tcache-dashboard
-    encode gzip
-    header {
-        Access-Control-Allow-Origin https://tests.cardano.intersectmbo.org
-        X-Content-Type-Options nosniff
-        Referrer-Policy no-referrer
-    }
-    file_server {
-        hide .*
-    }
-}
-```
-
-The page's data URL must point at this site. The stats come from
-`cardano-node-tests`, which uploads them at the end of each test run when its
-`ENABLE_TCACHE_STATS` repository variable is set. `cardano-sync-tests` uploads
-its runs the same way. They count as two more test types, node sync and
-db-sync, with the sync time as their test time, and the "Sync tests" panel
-adds the network and version detail.
+The stats come from `cardano-node-tests`, which uploads them at the end of each
+test run when its `ENABLE_TCACHE_STATS` repository variable is set.
+`cardano-sync-tests` uploads its runs the same way. They count as two more test
+types, node sync and db-sync, with the sync time as their test time, and the
+"Sync tests" panel adds the network and version detail.
 
 ### Try the dashboard locally
 
@@ -464,25 +505,21 @@ the script. The render happens inside the request, so give gunicorn a worker
 timeout above it, for example `--timeout 330` in `start_service.sh`; with
 its default of 30 seconds a four-run pick is killed half way.
 
-Forward the routes from the dashboard site, so they share the page's
-allowed origin. Expose `Retry-After` to the page: a browser hides that header
-from a page on another origin, and the page then shows the busy answer as an
-error and does not try again:
+Add this handler inside the `dashboard.example.org` block in
+[Publish the API and dashboard data](#publish-the-api-and-dashboard-data).
+It forwards graph and zip requests to the same Gunicorn service. Use the same
+allowed origin as for the JSON files and expose `Retry-After` so the page can
+retry when the renderer is busy:
 
 ```caddyfile
-dashboard.example.org {
-    root * /srv/tcache-dashboard
-    encode gzip
+handle /sync-analyzer/* {
     header {
         Access-Control-Allow-Origin https://tests.cardano.intersectmbo.org
         Access-Control-Expose-Headers Retry-After
         X-Content-Type-Options nosniff
         Referrer-Policy no-referrer
     }
-    reverse_proxy /sync-analyzer/* 127.0.0.1:8000
-    file_server {
-        hide .*
-    }
+    reverse_proxy 127.0.0.1:8000
 }
 ```
 
