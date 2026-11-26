@@ -290,12 +290,13 @@ class TestZipDownload:
     def test_a_visitor_downloads_a_run_without_logging_in(
         self, client: flask.testing.FlaskClient, auth_headers: dict
     ) -> None:
-        run_id = _upload(client, auth_headers, "11.2.0")
+        archive = _zip()
+        run_id = _upload(client, auth_headers, "11.2.0", content=archive)
 
         with client.get(f"/sync-analyzer/runs/{run_id}/zip") as resp:
             assert resp.status_code == http.HTTPStatus.OK
             assert resp.mimetype == "application/zip"
-            assert resp.data == _zip()
+            assert resp.data == archive
             assert "sync_results-mainnet-11.2.0.zip" in resp.headers["Content-Disposition"]
 
     def test_an_unknown_run_is_404(self, client: flask.testing.FlaskClient) -> None:
