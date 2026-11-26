@@ -497,6 +497,20 @@ flask --app testing_results_cache.app:create_app build-sync-analyzer --refresh-f
 make test
 ```
 
+### Check a deployment
+
+Export `TCACHE_URL` (the API base URL, for example
+`https://cardano-tests-api-2-70-224-86.nip.io/tcache`) and `TCACHE_BASIC_AUTH`
+(`username:password`), then run:
+
+```sh
+uv run pytest tests/test_deployment.py
+```
+
+These smoke tests are also collected by `make test` and are skipped if either
+variable is missing or empty. They use only read-only GET endpoints and work
+with an empty database.
+
 ## Run linters
 
 ```sh
